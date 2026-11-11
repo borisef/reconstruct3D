@@ -1,154 +1,127 @@
 """
 main.py
 
-Usage examples for reconstruction_utils.py, the implementation of the paper
-"3D-2D analysis of aircraft".
+Example driver for the JSON-based aircraft 3D-2D reconstruction.
 
-Strategy: build a synthetic ground-truth aircraft in 3D, project its four
-keypoints to normalized image coordinates with the pinhole model, derive the
-inputs the paper assumes are known (body direction V and range D), then run
-every reconstruction function and compare the recovered values against the
-ground truth. If the implementation is correct, the recovered 3D points match
-the originals up to floating-point precision.
+Usage:
+    python main.py [INPUT_JSON] [OUTPUT_JSON] [--source VARIANT]
+
+Reads an input document (see aircraft_io.py for the schema), solves for the 3D
+keypoints from the 2D pixel measurements + velocity + range, and writes an
+output document in the *exact same format*, extended with the Computed variants:
+
+    Coordinates_3D.P1_tail / P2_nose        : Computed1 = body_solution1
+                                              Computed2 = body_solution2
+    Coordinates_3D.P3_left_wing / P4_right  : Computed1 = wings_solution
+
+Everything else (Camera_parameters, GT/Noisy_GT values, the 2D block, velocity
+and range) is carried through unchanged. 2D Computed* and all Computed3 stay
+null for now.
+
+Defaults: INPUT_JSON = inputs/aircraft_input.json,
+          OUTPUT_JSON = outputs/aircraft_output.json,
+          --source    = Noisy_GT  (which input variant feeds the solvers).
 """
+
+import argparse
+import os
 
 import numpy as np
 
+import aircraft_io as aio
 import reconstruction_utils as ru
 
 
-np.set_printoptions(precision=4, suppress=True)
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_INPUT = os.path.join(HERE, "inputs", "aircraft_input.json")
+DEFAULT_OUTPUT = os.path.join(HERE, "outputs", "aircraft_output.json")
 
 
-def project(P):
-    """Pinhole projection of a 3D point to normalized coordinates (u, v)."""
-    X, Y, Z = P
-    return X / Z, Y / Z
+def _normalized_2d(doc, name, source, fx, fy, cx, cy):
+    """Normalized (u, v) of a 2D keypoint variant (stored in pixels)."""
+    px = doc["Coordinates_2D"][name][source]
+    if px is None:
+        raise ValueError(f"Coordinates_2D.{name}.{source} is null; "
+                         f"cannot solve from variant '{source}'.")
+    return aio.pixel_to_normalized([px["u"], px["v"]], fx, fy, cx, cy)
 
 
-def build_ground_truth():
-    """A synthetic aircraft placed in front of the camera.
+def solve_document(doc, source="Noisy_GT"):
+    """Fill the Computed* 3D variants in ``doc`` (mutated in place) and return it.
 
-    Returns the four 3D keypoints and the derived known quantities.
+    Solves from the 2D pixel keypoints, velocity vector and range of the chosen
+    input ``source`` variant.
     """
-    # Body center ~2 km away, slightly off-axis.
-    center = np.array([150.0, -80.0, 2000.0])
+    fx, fy, cx, cy = aio.camera_intrinsics(doc["Camera_parameters"])
 
-    body_dir = ru._normalize([0.3, 0.1, 1.0])   # tail -> nose (== velocity V)
-    wing_dir = ru._normalize(np.cross([0.0, 1.0, 0.0], body_dir))  # left->right
+    (u1, v1) = _normalized_2d(doc, "p1_tail", source, fx, fy, cx, cy)
+    (u2, v2) = _normalized_2d(doc, "p2_nose", source, fx, fy, cx, cy)
+    (u3, v3) = _normalized_2d(doc, "p3_left_wing", source, fx, fy, cx, cy)
+    (u4, v4) = _normalized_2d(doc, "p4_right_wing", source, fx, fy, cx, cy)
 
-    body_half = 15.0   # half body length (m)
-    wing_half = 20.0   # half wingspan (m)
+    Vd = doc["Velocity_vector_3D"][source]
+    V = np.array([Vd["V_x"], Vd["V_y"], Vd["V_z"]])
+    D = doc["Range_meters"][source]
 
-    P1 = center - body_dir * body_half   # tail
-    P2 = center + body_dir * body_half   # nose
-    P3 = center - wing_dir * wing_half   # left wingtip
-    P4 = center + wing_dir * wing_half   # right wingtip
+    # Body: both solutions. (Wing midpoint == body midpoint == aircraft centre,
+    # so the single body range D serves the wings too.)
+    P1_s1, P2_s1 = ru.body_solution1(u1, v1, u2, v2, V, D)
+    P1_s2, P2_s2 = ru.body_solution2(u1, v1, u2, v2, V, D)
+    P3, P4 = ru.wings_solution(u3, v3, u4, v4, V, D)
 
-    V = body_dir                         # unit velocity vector (assumption 7)
-    D_body = np.linalg.norm(0.5 * (P1 + P2))   # range to body midpoint
-    D_wing = np.linalg.norm(0.5 * (P3 + P4))   # range to wing midpoint
-    return P1, P2, P3, P4, V, D_body, D_wing
+    c3d = doc["Coordinates_3D"]
+    c3d["P1_tail"]["Computed1"] = aio.vec3(P1_s1)
+    c3d["P1_tail"]["Computed2"] = aio.vec3(P1_s2)
+    c3d["P2_nose"]["Computed1"] = aio.vec3(P2_s1)
+    c3d["P2_nose"]["Computed2"] = aio.vec3(P2_s2)
+    c3d["P3_left_wing"]["Computed1"] = aio.vec3(P3)
+    c3d["P4_right_wing"]["Computed1"] = aio.vec3(P4)
+    return doc
 
 
-def report(name, P_true, P_est):
-    err = np.linalg.norm(P_true - P_est)
-    print(f"  {name}: true={P_true}  est={P_est}  |err|={err:.3e}")
+def _xyz(d):
+    return None if d is None else np.array([d["X"], d["Y"], d["Z"]])
+
+
+def report(doc):
+    """Print Computed-vs-GT errors for a quick sanity check."""
+    np.set_printoptions(precision=3, suppress=True)
+    print("Computed vs GT (|err| in metres):")
+    rows = [
+        ("P1_tail", "Computed1"), ("P1_tail", "Computed2"),
+        ("P2_nose", "Computed1"), ("P2_nose", "Computed2"),
+        ("P3_left_wing", "Computed1"), ("P4_right_wing", "Computed1"),
+    ]
+    for name, variant in rows:
+        entry = doc["Coordinates_3D"][name]
+        gt = _xyz(entry["GT"])
+        est = _xyz(entry[variant])
+        if gt is None or est is None:
+            continue
+        err = np.linalg.norm(gt - est)
+        print(f"  {name:<14} {variant}: est={est}  |err|={err:.3f}")
 
 
 def main():
-    P1, P2, P3, P4, V, D_body, D_wing = build_ground_truth()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", nargs="?", default=DEFAULT_INPUT,
+                        help="input JSON path")
+    parser.add_argument("output", nargs="?", default=DEFAULT_OUTPUT,
+                        help="output JSON path")
+    parser.add_argument("--source", default="Noisy_GT",
+                        choices=aio.VARIANTS,
+                        help="input variant the solvers read (default Noisy_GT)")
+    args = parser.parse_args()
 
-    (u1, v1) = project(P1)
-    (u2, v2) = project(P2)
-    (u3, v3) = project(P3)
-    (u4, v4) = project(P4)
+    doc = aio.load_json(args.input)
+    solve_document(doc, source=args.source)
 
-    print("=" * 70)
-    print("Ground-truth aircraft")
-    print("=" * 70)
-    print(f"  V (body dir) = {V}")
-    print(f"  D_body = {D_body:.3f}   D_wing = {D_wing:.3f}")
-    print(f"  normalized keypoints:")
-    print(f"    P1 (tail) -> (u1,v1) = ({u1:.5f}, {v1:.5f})")
-    print(f"    P2 (nose) -> (u2,v2) = ({u2:.5f}, {v2:.5f})")
-    print(f"    P3 (lwing)-> (u3,v3) = ({u3:.5f}, {v3:.5f})")
-    print(f"    P4 (rwing)-> (u4,v4) = ({u4:.5f}, {v4:.5f})")
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    aio.save_json(args.output, doc)
 
-    # ---------------------------------------------------------------- #
-    # Appendix camera helpers
-    # ---------------------------------------------------------------- #
-    print("\n" + "=" * 70)
-    print("Appendix: camera helpers")
-    print("=" * 70)
-    W_pixel, H_pixel, fov = 1920, 1080, np.deg2rad(5.0)  # small FOV (assumption 2)
-    f = ru.focal_length_from_fov(W_pixel, fov, S=1.0)
-    print(f"  focal_length_from_fov(W={W_pixel}, FOV=5deg) = {f:.3f} px")
-    # Round-trip: take P2's normalized coords, pretend they came from pixels.
-    cx, cy = W_pixel / 2.0, H_pixel / 2.0
-    x_px, y_px = u2 * f + cx, v2 * f + cy
-    uv = ru.normalize_coords(x_px, y_px, cx, cy, f)
-    print(f"  normalize_coords round-trip -> {uv}  (expected ({u2:.5f}, {v2:.5f}))")
-
-    # ---------------------------------------------------------------- #
-    # Body - Solution #1
-    # ---------------------------------------------------------------- #
-    print("\n" + "=" * 70)
-    print("Body - Solution #1 (direction first, then range)")
-    print("=" * 70)
-    P1e, P2e = ru.body_solution1(u1, v1, u2, v2, V, D_body)
-    report("P1", P1, P1e)
-    report("P2", P2, P2e)
-
-    # ---------------------------------------------------------------- #
-    # Body - Solution #2
-    # ---------------------------------------------------------------- #
-    print("\n" + "=" * 70)
-    print("Body - Solution #2 (range first, then direction)")
-    print("=" * 70)
-    P1e2, P2e2 = ru.body_solution2(u1, v1, u2, v2, V, D_body)
-    report("P1", P1, P1e2)
-    report("P2", P2, P2e2)
-    print(f"  solution1 vs solution2 agreement: "
-          f"|dP1|={np.linalg.norm(P1e - P1e2):.3e}, "
-          f"|dP2|={np.linalg.norm(P2e - P2e2):.3e}")
-
-    # ---------------------------------------------------------------- #
-    # Wings
-    # ---------------------------------------------------------------- #
-    print("\n" + "=" * 70)
-    print("Wings")
-    print("=" * 70)
-    P3e, P4e = ru.wings_solution(u3, v3, u4, v4, V, D_wing)
-    report("P3", P3, P3e)
-    report("P4", P4, P4e)
-    perp = np.dot(P3e - P4e, V)
-    print(f"  (P3-P4).V = {perp:.3e}  (should be ~0, wings perpendicular to V)")
-
-    # ---------------------------------------------------------------- #
-    # 6 DOF
-    # ---------------------------------------------------------------- #
-    print("\n" + "=" * 70)
-    print("6 DOF")
-    print("=" * 70)
-    pose_true = ru.compute_6dof(P1, P2, P3, P4)
-    pose_est = ru.compute_6dof(P1e, P2e, P3e, P4e)
-    print(f"  translation  true={pose_true['translation']}  est={pose_est['translation']}")
-    print(f"  rvec         true={pose_true['rvec']}  est={pose_est['rvec']}")
-    for ang in ("pitch", "yaw", "roll"):
-        print(f"  {ang:<6} true={np.rad2deg(pose_true[ang]):8.3f} deg   "
-              f"est={np.rad2deg(pose_est[ang]):8.3f} deg")
-
-    # ---------------------------------------------------------------- #
-    # Derived sizes
-    # ---------------------------------------------------------------- #
-    print("\n" + "=" * 70)
-    print("Derived geometry")
-    print("=" * 70)
-    print(f"  body length (true/est): "
-          f"{np.linalg.norm(P2 - P1):.3f} / {np.linalg.norm(P2e - P1e):.3f} m")
-    print(f"  wing span   (true/est): "
-          f"{np.linalg.norm(P4 - P3):.3f} / {np.linalg.norm(P4e - P3e):.3f} m")
+    print(f"Solved '{args.input}' (source={args.source})")
+    print(f"Wrote  '{args.output}'")
+    report(doc)
 
 
 if __name__ == "__main__":
