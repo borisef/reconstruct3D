@@ -11,11 +11,14 @@ The algorithm is driven by a single JSON document whose shape is fixed:
     Velocity_vector_3D : the body/velocity direction
     Range_meters       : distance from the camera to the body midpoint (scalar)
 
-Every keypoint / vector / range carries up to five value *variants*:
+Every keypoint / vector / range carries a set of value *variants*:
 
     GT, Noisy_GT, Computed1, Computed2, Computed3
 
-any of which may be ``null``. 3D values are ``{"X","Y","Z"}``, 2D values are
+any of which may be ``null``. Exception: **3D keypoints carry no Noisy_GT** —
+the noisy measurements feeding the algorithm are the 2D pixels, the velocity
+and the range only, so 3D blocks have just GT + Computed1..3 (``VARIANTS_3D``).
+3D values are ``{"X","Y","Z"}``, 2D values are
 ``{"u","v"}`` in pixels, velocity values are ``{"V_x","V_y","V_z"}`` and the
 range is a plain number.
 
@@ -34,6 +37,9 @@ import numpy as np
 KEYPOINTS_3D = ["P1_tail", "P2_nose", "P3_left_wing", "P4_right_wing"]
 KEYPOINTS_2D = ["p1_tail", "p2_nose", "p3_left_wing", "p4_right_wing"]
 VARIANTS = ["GT", "Noisy_GT", "Computed1", "Computed2", "Computed3"]
+# 3D keypoints have no Noisy_GT: the noisy algorithm inputs are 2D + velocity
+# + range only.
+VARIANTS_3D = ["GT", "Computed1", "Computed2", "Computed3"]
 
 BLOCKS = ["Camera_parameters", "Coordinates_3D", "Coordinates_2D",
           "Velocity_vector_3D", "Range_meters"]
@@ -71,14 +77,16 @@ def scalar(value):
     return None if value is None else float(value)
 
 
-def variant_block(**vals):
-    """A full 5-variant block; variants not supplied default to ``None``.
+def variant_block(variants=None, **vals):
+    """A full variant block; variants not supplied default to ``None``.
 
+    ``variants`` defaults to the full 5-variant set (``VARIANTS``); pass
+    ``VARIANTS_3D`` for 3D keypoints, which carry no Noisy_GT.
     Example: ``variant_block(GT=vec3(P), Noisy_GT=vec3(Pn))`` yields a dict with
     all of GT/Noisy_GT/Computed1/Computed2/Computed3 present, the latter three
     ``None``.
     """
-    return {name: vals.get(name, None) for name in VARIANTS}
+    return {name: vals.get(name, None) for name in (variants or VARIANTS)}
 
 
 # --------------------------------------------------------------------------- #

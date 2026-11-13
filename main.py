@@ -14,9 +14,10 @@ output document in the *exact same format*, extended with the Computed variants:
                                               Computed2 = body_solution2
     Coordinates_3D.P3_left_wing / P4_right  : Computed1 = wings_solution
 
-Everything else (Camera_parameters, GT/Noisy_GT values, the 2D block, velocity
-and range) is carried through unchanged. 2D Computed* and all Computed3 stay
-null for now.
+Everything else (Camera_parameters, GT values, the 2D block, velocity and
+range, incl. their Noisy_GT) is carried through unchanged. 3D keypoints carry
+no Noisy_GT -- the noisy inputs are 2D + velocity + range. 2D Computed* and
+all Computed3 stay null for now.
 
 Defaults: INPUT_JSON = inputs/aircraft_input.json,
           OUTPUT_JSON = outputs/aircraft_output.json,

@@ -7,8 +7,10 @@ Build a sample input JSON (``inputs/aircraft_input.json``) for the aircraft
 The ground truth is the same synthetic aircraft used by ``main.py``: a target
 ~2 km away with a 30 m body and 40 m wingspan. We project its four keypoints to
 pixel coordinates, derive the velocity vector and range, then add a small amount
-of deterministic Gaussian noise to populate ``Noisy_GT``. All ``Computed*``
-variants are left ``null`` -- they will be filled in by the later solve step.
+of deterministic Gaussian noise to populate ``Noisy_GT`` for the algorithm
+inputs (2D pixels, velocity, range). 3D keypoints carry no Noisy_GT. All
+``Computed*`` variants are left ``null`` -- they will be filled in by the later
+solve step.
 """
 
 import numpy as np
@@ -42,7 +44,6 @@ def build_ground_truth():
 # --------------------------------------------------------------------------- #
 # Noise model (deterministic)
 # --------------------------------------------------------------------------- #
-SIGMA_3D = 2.0    # m per axis
 SIGMA_2D = 1.5    # pixels per axis
 SIGMA_V = 0.01    # per axis (velocity re-normalized afterwards)
 SIGMA_RANGE = 10.0  # m
@@ -67,9 +68,9 @@ def main():
     # GT 2D pixel projections.
     pts2d = [aio.project_pixel(P, fx, fy, cx, cy) for P in pts3d]
 
-    # Deterministic noise.
+    # Deterministic noise (2D pixels, velocity and range only -- the 3D
+    # keypoints are ground truth and carry no Noisy_GT).
     rng = np.random.default_rng(0)
-    pts3d_noisy = [P + rng.normal(0.0, SIGMA_3D, 3) for P in pts3d]
     pts2d_noisy = [p + rng.normal(0.0, SIGMA_2D, 2) for p in pts2d]
     V_noisy = ru._normalize(V + rng.normal(0.0, SIGMA_V, 3))
     D_noisy = D + rng.normal(0.0, SIGMA_RANGE)
@@ -78,8 +79,8 @@ def main():
     doc = {
         "Camera_parameters": cam,
         "Coordinates_3D": {
-            name: aio.variant_block(GT=aio.vec3(P), Noisy_GT=aio.vec3(Pn))
-            for name, P, Pn in zip(aio.KEYPOINTS_3D, pts3d, pts3d_noisy)
+            name: aio.variant_block(variants=aio.VARIANTS_3D, GT=aio.vec3(P))
+            for name, P in zip(aio.KEYPOINTS_3D, pts3d)
         },
         "Coordinates_2D": {
             name: aio.variant_block(GT=aio.vec2(p), Noisy_GT=aio.vec2(pn))
