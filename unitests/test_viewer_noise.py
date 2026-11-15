@@ -152,20 +152,19 @@ def test_noise_target_switch_does_not_affect_sigma_of_other_targets(viewer):
 
 # ── noise is reflected wherever the noisy element is visible ──────────────────
 # 2D noise -> any view except "3D results"; Velocity/Range noise -> any view
-# except "2D" and "3D results". Computed* changes only on an explicit Solve.
+# except "2D" and "3D results". Computed changes only on an explicit Solve.
 
 def test_noise_never_touches_computed(viewer):
     """Noise presses re-sample Noisy_GT only; no implicit re-solve."""
     from main import solve_document
-    solve_document(viewer.doc, source="Noisy_GT")
+    solve_document(viewer.doc)
     before = json.loads(json.dumps(viewer.doc["Coordinates_3D"]))
     for target in ["2D", "Velocity", "Range"]:
         viewer._on_noise_target(target)
         viewer._on_noise(up=True)
     after = viewer.doc["Coordinates_3D"]
     for el in before:
-        for v in ["Computed1", "Computed2", "Computed3"]:
-            assert before[el][v] == after[el][v]
+        assert before[el]["Computed"] == after[el]["Computed"]
 
 def test_2d_noise_moves_scheme_plane_marker(viewer):
     """The on-plane Noisy_GT 2D marker tracks the stored pixels (scheme views)."""

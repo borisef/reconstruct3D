@@ -13,14 +13,20 @@ The algorithm is driven by a single JSON document whose shape is fixed:
 
 Every keypoint / vector / range carries a set of value *variants*:
 
-    GT, Noisy_GT, Computed1, Computed2, Computed3
+    GT, Noisy_GT, Computed
 
-any of which may be ``null``. Exception: **3D keypoints carry no Noisy_GT** —
-the noisy measurements feeding the algorithm are the 2D pixels, the velocity
-and the range only, so 3D blocks have just GT + Computed1..3 (``VARIANTS_3D``).
+any of which may be ``null``. The algorithm produces exactly ONE solution per
+run (which body solution it reports is an algorithm parameter), stored in
+``Computed``. Exception: **3D keypoints carry no Noisy_GT** — the noisy
+measurements feeding the algorithm are the 2D pixels, the velocity and the
+range only, so 3D blocks have just GT + Computed (``VARIANTS_3D``).
 3D values are ``{"X","Y","Z"}``, 2D values are
 ``{"u","v"}`` in pixels, velocity values are ``{"V_x","V_y","V_z"}`` and the
 range is a plain number.
+
+Solved documents additionally carry two optional top-level blocks (see
+main.py): ``Algorithm_parameters`` (the parameters the solver ran with) and
+``Results`` (the 2D reprojection-error and 3D summary tables).
 
 These helpers are schema-aware builders + a camera model (pixel <-> normalized),
 shared by the input generator and the later solve-and-write step.
@@ -36,13 +42,15 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 KEYPOINTS_3D = ["P1_tail", "P2_nose", "P3_left_wing", "P4_right_wing"]
 KEYPOINTS_2D = ["p1_tail", "p2_nose", "p3_left_wing", "p4_right_wing"]
-VARIANTS = ["GT", "Noisy_GT", "Computed1", "Computed2", "Computed3"]
+VARIANTS = ["GT", "Noisy_GT", "Computed"]
 # 3D keypoints have no Noisy_GT: the noisy algorithm inputs are 2D + velocity
 # + range only.
-VARIANTS_3D = ["GT", "Computed1", "Computed2", "Computed3"]
+VARIANTS_3D = ["GT", "Computed"]
 
 BLOCKS = ["Camera_parameters", "Coordinates_3D", "Coordinates_2D",
           "Velocity_vector_3D", "Range_meters"]
+# Written by the solver, absent from fresh inputs.
+OPTIONAL_BLOCKS = ["Algorithm_parameters", "Results"]
 
 
 # --------------------------------------------------------------------------- #
@@ -80,11 +88,10 @@ def scalar(value):
 def variant_block(variants=None, **vals):
     """A full variant block; variants not supplied default to ``None``.
 
-    ``variants`` defaults to the full 5-variant set (``VARIANTS``); pass
+    ``variants`` defaults to the full variant set (``VARIANTS``); pass
     ``VARIANTS_3D`` for 3D keypoints, which carry no Noisy_GT.
-    Example: ``variant_block(GT=vec3(P), Noisy_GT=vec3(Pn))`` yields a dict with
-    all of GT/Noisy_GT/Computed1/Computed2/Computed3 present, the latter three
-    ``None``.
+    Example: ``variant_block(GT=vec3(P), Noisy_GT=vec3(Pn))`` yields a dict
+    with all of GT/Noisy_GT/Computed present, the last one ``None``.
     """
     return {name: vals.get(name, None) for name in (variants or VARIANTS)}
 

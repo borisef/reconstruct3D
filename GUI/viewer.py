@@ -4,7 +4,7 @@ GUI/viewer.py
 Matplotlib-based viewer for the aircraft 3D-2D reconstruction JSON documents.
 
 Controls (left panel):
-  * A compact visibility grid. Rows = variants (GT, Noisy_GT, Computed1..3),
+  * A compact visibility grid. Rows = variants (GT, Noisy_GT, Computed),
     labelled once on the left. Columns = elements, grouped:
         3D pts : P1 P2 P3 P4   (Coordinates_3D)
         2D pts : p1 p2 p3 p4   (Coordinates_2D)
@@ -18,10 +18,17 @@ Controls (left panel):
     tail and nose) drawn as a triad in the pinhole views (b) and (c).
   * A "View" dropdown (2D / Pinhole / 3D interactive / 3D results /
     Change GT) -- one line.
-  * Load JSON / Save JSON / "Solve GT" / "Solve Noisy" buttons and a status
-    line. The solve buttons call main.solve_document(doc, source=...) with GT
-    or Noisy_GT as the input variant feeding the algorithms; Save always asks
-    where to save (dialog pre-filled with the loaded path).
+  * Load JSON / Save JSON / "Solve" buttons and a status line. Solve calls
+    main.solve_document(doc, params=...) with the current algorithm
+    parameters; Save always asks where to save (dialog pre-filled with the
+    loaded path).
+  * A "Set Algo Params" button popping up a small form with the algorithm
+    parameters: "Input Type: Noisy" (checkbox, default on -- the solver reads
+    Noisy_GT instead of GT) and "Head/Tail solution" (#1 / #2 / Average --
+    which of the two-fold-ambiguous body solutions is reported). The
+    parameters persist in the document (Algorithm_parameters block), and a
+    solve also writes the Results block (2D/3D results tables) so Save JSON
+    exports parameters + solution + results together.
   * Noise Up / Noise Down buttons + "Noise target" radio (2D / Velocity /
     Range): each press re-samples the selected Noisy_GT block from
     GT + N(0, sigma), scaling that target's own sigma by 1.5 per press
@@ -42,18 +49,15 @@ Visualization:
     segments reuse the body/wing colours at lower alpha; dotted connectors
     link each GT point to its computed counterpart. A results table
     (rows XYZ(m) / YPR(deg) / BodyLength / WingsSpan / CrossPoint, columns
-    GT / Calc1 / Calc2) summarises each reconstruction; CrossPoint is where
-    the wings segment crosses the body, 0 = tail .. 1 = nose. Body compares
-    against Computed2 when any 3D Computed2 cell is checked, else Computed1
-    (wings only ever have Computed1 and fall back to it).
+    GT / Calc) summarises the reconstruction; CrossPoint is where the wings
+    segment crosses the body, 0 = tail .. 1 = nose.
 
 Encoding (shared by all views):
   * Point COLOUR identifies the element; point MARKER identifies the variant
-    (GT = filled dot, Noisy_GT = open dot, Computed1 = diamond,
-    Computed2 = square, Computed3 = triangle).
+    (GT = filled dot, Noisy_GT = open dot, Computed = diamond).
   * Segments are arrows: tail->nose RED, left->right wing BLUE, velocity GREEN.
     With several variants visible, the arrow uses the highest-priority visible
-    one (GT > Noisy_GT > Computed1 > ...).
+    one (GT > Noisy_GT > Computed).
 
 Run:
     python GUI/viewer.py [PATH_TO_JSON]
@@ -77,7 +81,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import aircraft_io as aio  # noqa: E402
-import reconstruction_utils as ru  # noqa: E402
+import main as algo  # noqa: E402  (solver + shared results/stats helpers)
 from aircraft_frame import AircraftFrame  # noqa: E402
 
 
@@ -92,9 +96,8 @@ ELEMENT_2D = {
 }
 KEYPOINTS = list(ELEMENT_2D)
 
-VARIANTS = aio.VARIANTS  # ["GT","Noisy_GT","Computed1","Computed2","Computed3"]
-VARIANT_SHORT = {"GT": "GT", "Noisy_GT": "N_GT", "Computed1": "Cmp1",
-                 "Computed2": "Cmp2", "Computed3": "Cmp3"}
+VARIANTS = aio.VARIANTS  # ["GT", "Noisy_GT", "Computed"]
+VARIANT_SHORT = {"GT": "GT", "Noisy_GT": "N_GT", "Computed": "Cmp"}
 
 # Control-grid columns: (key, kind, short label).
 COLUMNS = (
@@ -113,21 +116,24 @@ POINT_COLORS = {
 }
 
 VARIANT_MARKERS = {
-    "GT":        {"marker": "o", "filled": True},
-    "Noisy_GT":  {"marker": "o", "filled": False},
-    "Computed1": {"marker": "D", "filled": True},
-    "Computed2": {"marker": "s", "filled": True},
-    "Computed3": {"marker": "^", "filled": True},
+    "GT":       {"marker": "o", "filled": True},
+    "Noisy_GT": {"marker": "o", "filled": False},
+    "Computed": {"marker": "D", "filled": True},
 }
 
 BODY_ARROW = "red"      # tail -> nose
 WING_ARROW = "blue"     # left wing -> right wing
 VEL_ARROW = "green"     # velocity direction
 
+# Vertical tail stabilizer (orientation cue, cf. assets/figure1.png): a
+# derived segment from the tail along local +Z, this fraction of body length.
+FIN_FRACTION = 0.20
+
 VIEW_OPTIONS = ["2D", "Pinhole (scheme)", "3D interactive", "3D results",
-                "Change GT"]
+                "2D results", "Change GT"]
 VIEW_KEY = {"2D": "2D", "Pinhole (scheme)": "pinhole", "3D interactive": "3d",
-            "3D results": "results", "Change GT": "edit"}
+            "3D results": "results", "2D results": "results2d",
+            "Change GT": "edit"}
 
 # ----- Pinhole-scheme geometry (view b) ------------------------------------ #
 # The real configuration (narrow FOV, small aircraft, huge range) cannot be
@@ -194,8 +200,7 @@ VIEW3D_HELP = ("mouse:  L-drag rotate   M-drag pan   R-drag/scroll zoom\n"
 # GT vs Computed keypoints drawn in REAL camera coordinates (metres), framed on
 # the aircraft so every point is inside the view. The computed aircraft reuses
 # the body/wing arrow colours at lower alpha so the two overlays stay easy to
-# tell apart. Body: Computed2 when any 3D Computed2 cell is checked, else
-# Computed1; wings only ever have Computed1.
+# tell apart.
 RESULTS_PT_ALPHA = 0.75   # computed point markers
 RESULTS_SEG_ALPHA = 0.35  # computed body/wing segments (same colours as GT)
 
@@ -205,7 +210,14 @@ RESULTS_SEG_ALPHA = 0.35  # computed body/wing segments (same colours as GT)
 # (X wings, Y tail->nose, Z up). GT 2D projections, velocity and range follow.
 GT_MOVE_STEP = 2.0        # metres per key press, along a local axis
 GT_ROT_STEP = 5.0         # degrees per key press (yaw/pitch/roll)
+GT_CROSS_STEP = 0.05      # CrossPoint units per key press (wings slide, w/s)
+GT_SCALE_STEP = 1.05      # size factor per key press (span a/d, body q/e)
+GT_SIZE_MIN = 1.0         # m, lower clamp for wingspan / body length
 GT_UNDO_MAX = 200         # undo-stack depth
+
+# 2D GT must be the pinhole projection of 3D GT; stored pixels further off
+# than this (in px) are considered stale and get re-derived on load.
+GT2D_TOL_PX = 1e-6
 
 # ----- Noisy_GT re-sampling (Noise Up / Noise Down + target radio) ---------- #
 # Each press re-samples the selected Noisy_GT block from GT + N(0, sigma):
@@ -228,6 +240,8 @@ EDIT_HELP = ("mouse:  L-drag rotate   M-drag pan   scroll zoom   (camera)\n"
              "+/- Y (fwd/back)\n"
              "          shift+←→ yaw   shift+↑↓ pitch   "
              "ctrl+←→ roll\n"
+             "wings:  w/s slide along body (CrossPoint)   a/d span -/+\n"
+             "body:   q/e length -/+\n"
              "ctrl+z undo   0/Home reset camera")
 # Boxed controls legend, lower-left corner of the Change-GT view.
 EDIT_CONTROLS_BOX = (
@@ -237,6 +251,10 @@ EDIT_CONTROLS_BOX = (
     "Rotate GT  shift+←→  yaw     shift+↑↓  pitch\n"
     "           ctrl+←→   roll\n"
     "           (about centre, 5°/step; X,Y,Z kept)\n"
+    "Wings      w  toward nose    s  toward tail\n"
+    "           (CrossPoint ±0.05, clamped to [0,1])\n"
+    "Size       a/d  wingspan -/+    q/e  body -/+\n"
+    "           (x1.05 per step, about the centre)\n"
     "Undo       ctrl+z\n"
     "Camera     mouse: L-drag rotate, M-drag pan,\n"
     "           scroll zoom      0/Home reset")
@@ -395,6 +413,7 @@ class AircraftViewer:
     def __init__(self, path=None):
         self.path = path or self._default_path()
         self.doc = aio.load_json(self.path)
+        self._ensure_gt_2d_consistent()
         self.view = "2D"
         self.show_legends = True
         self.show_local_axes = True
@@ -404,6 +423,11 @@ class AircraftViewer:
         self.noise_target = "2D"   # radio: which Noisy_GT block to re-sample
         self.noise_sigma = {t: p["default"] for t, p in NOISE_PARAMS.items()}
         self._rng = np.random.default_rng()
+        self._last_solve_source = None  # last solve's input variant; it is the
+                                        # error reference of the 2D-results view
+        # Algorithm parameters (Set Algo Params form); documents may carry
+        # their own Algorithm_parameters block, which wins over the defaults.
+        self.algo_params = algo.algo_params(self.doc)
         self._init_visibility()
 
         self.fig = None
@@ -483,6 +507,63 @@ class AircraftViewer:
         return None if entry is None else \
             np.array([entry["V_x"], entry["V_y"], entry["V_z"]])
 
+    # --------------------------------------------- tail fin (derived) #
+    @staticmethod
+    def _fin_from_points(P1, P2, P3w, P4w):
+        """Fin segment (tail, tip) from the four keypoints, or None.
+
+        tip = P1 + FIN_FRACTION * |P2-P1| * Z_local with
+        Z_local = normalize((P4-P3) x (P2-P1)) — the aircraft's local "up".
+        """
+        if any(p is None for p in (P1, P2, P3w, P4w)):
+            return None
+        Y = P2 - P1
+        Z = np.cross(P4w - P3w, Y)
+        n = np.linalg.norm(Z)
+        if n < 1e-12:
+            return None
+        return P1, P1 + FIN_FRACTION * np.linalg.norm(Y) * (Z / n)
+
+    def _fin_segment(self, variant):
+        """Fin segment of ``variant`` in camera coordinates, or None."""
+        pts = {el: self.point3d(el, variant) for el in KEYPOINTS}
+        return self._fin_from_points(pts["P1_tail"], pts["P2_nose"],
+                                     pts["P3_left_wing"], pts["P4_right_wing"])
+
+    # --------------------------------------------- GT 2D/3D consistency #
+    def _check_gt_2d_consistency(self):
+        """Re-derive any stale 2D GT from the 3D GT; return corrected elements.
+
+        The 2D GT pixels must always be the pinhole projection of the 3D GT
+        points. Loaded files may violate this; stale (or missing) values are
+        corrected in place.
+        """
+        fx, fy, cx, cy = aio.camera_intrinsics(self.doc["Camera_parameters"])
+        fixed = []
+        for el in KEYPOINTS:
+            P = self.point3d(el, "GT")
+            if P is None or P[2] <= 1e-9:
+                continue              # nothing to project from
+            proj = aio.project_pixel(P, fx, fy, cx, cy)
+            stored = self.point2d(el, "GT")
+            if stored is None or np.max(np.abs(stored - proj)) > GT2D_TOL_PX:
+                self.doc["Coordinates_2D"][ELEMENT_2D[el]]["GT"] = aio.vec2(proj)
+                fixed.append(el)
+        return fixed
+
+    def _ensure_gt_2d_consistent(self):
+        """Run the GT 2D check after a load; pop an info box if it corrected."""
+        fixed = self._check_gt_2d_consistency()
+        if fixed:
+            self._show_info(
+                "2D GT corrected",
+                "The 2D GT points in the loaded JSON did not match the "
+                "pinhole projection of the 3D GT points for:\n\n    "
+                + ", ".join(fixed) +
+                "\n\nThey were re-derived from the 3D GT. The document in "
+                "memory is now consistent; use Save JSON to persist it.")
+        return fixed
+
     def _priority_variant_2d(self, elements):
         for v in VARIANTS:
             if all(self._is_visible(el, "2D", v) and self.point2d(el, v) is not None
@@ -506,6 +587,12 @@ class AircraftViewer:
         for km in ("keymap.back", "keymap.forward"):
             mpl.rcParams[km] = [k for k in mpl.rcParams[km]
                                 if k not in ("left", "right", "up", "down")]
+        # Free "s" for the wings-slide edit control (ctrl+s still saves) and
+        # "q" for the body-length control (ctrl+w still quits).
+        mpl.rcParams["keymap.save"] = [k for k in mpl.rcParams["keymap.save"]
+                                       if k != "s"]
+        mpl.rcParams["keymap.quit"] = [k for k in mpl.rcParams["keymap.quit"]
+                                       if k != "q"]
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self.fig.canvas.mpl_connect("scroll_event", self._on_scroll)
 
@@ -537,22 +624,22 @@ class AircraftViewer:
         ax_save = self.fig.add_axes([0.095, 0.475, 0.072, 0.045])
         self._btn_save = Button(ax_save, "Save JSON")
         self._btn_save.on_clicked(self._on_save)
-        ax_sgt = self.fig.add_axes([0.175, 0.475, 0.088, 0.045])
-        self._btn_solve_gt = Button(ax_sgt, "Solve GT")
-        self._btn_solve_gt.on_clicked(lambda _e: self._solve("GT"))
+        ax_slv = self.fig.add_axes([0.175, 0.475, 0.088, 0.045])
+        self._btn_solve = Button(ax_slv, "Solve")
+        self._btn_solve.on_clicked(lambda _e: self._solve())
 
-        ax_sn = self.fig.add_axes([0.015, 0.42, 0.072, 0.045])
-        self._btn_solve_noisy = Button(ax_sn, "Solve Noisy")
-        self._btn_solve_noisy.on_clicked(lambda _e: self._solve("Noisy_GT"))
-        ax_nu = self.fig.add_axes([0.095, 0.42, 0.072, 0.045])
+        ax_prm = self.fig.add_axes([0.015, 0.42, 0.104, 0.045])
+        self._btn_params = Button(ax_prm, "Set Algo Params")
+        self._btn_params.on_clicked(self._on_set_params)
+        ax_nu = self.fig.add_axes([0.127, 0.42, 0.064, 0.045])
         self._btn_noise_up = Button(ax_nu, "Noise Up")
         self._btn_noise_up.on_clicked(lambda _e: self._on_noise(up=True))
-        ax_nd = self.fig.add_axes([0.175, 0.42, 0.088, 0.045])
+        ax_nd = self.fig.add_axes([0.199, 0.42, 0.064, 0.045])
         self._btn_noise_down = Button(ax_nd, "Noise Down")
         self._btn_noise_down.on_clicked(lambda _e: self._on_noise(up=False))
 
-        for btn in (self._btn_load, self._btn_save, self._btn_solve_gt,
-                    self._btn_solve_noisy, self._btn_noise_up,
+        for btn in (self._btn_load, self._btn_save, self._btn_solve,
+                    self._btn_params, self._btn_noise_up,
                     self._btn_noise_down):
             btn.label.set_fontsize(8)
 
@@ -609,7 +696,10 @@ class AircraftViewer:
             return
         self.path = path
         self.doc = aio.load_json(path)
+        self._ensure_gt_2d_consistent()
         self._undo_stack = []
+        self._last_solve_source = None
+        self.algo_params = algo.algo_params(self.doc)
         if self.view == "edit":    # re-anchor the edit scene to the new data
             self._edit_anchor = self._scheme_anchor()
         self._init_visibility()
@@ -618,23 +708,85 @@ class AircraftViewer:
         self.render()
         self.fig.canvas.draw_idle()
 
-    def _solve(self, source):
-        """Run the solvers with ``source`` as the input variant.
+    def _solve(self):
+        """Run the solver with the current algorithm parameters.
 
         This is the GUI's algorithm interface: ``main.solve_document(doc,
-        source=...)`` reads the chosen variant's 2D keypoints, velocity and
-        range and fills the Computed* 3D slots in place.
+        params=...)`` reads the parameter-selected variant's 2D keypoints,
+        velocity and range and fills the single Computed solution in place
+        (plus the Algorithm_parameters and Results blocks).
         """
         try:
-            from main import solve_document
-            solve_document(self.doc, source=source)
+            algo.solve_document(self.doc, params=self.algo_params)
+            self._last_solve_source = \
+                "Noisy_GT" if self.algo_params["input_noisy"] else "GT"
             self._sync_visibility()
-            self._status.set_text(self._status_text() + f"  [solved: {source}]")
+            self._status.set_text(self._status_text()
+                                  + f"  [solved: {self._params_text()}]")
         except Exception as exc:  # pragma: no cover - surfaced in the GUI
-            self._status.set_text(f"solve failed ({source}): {exc}")
+            self._status.set_text(f"solve failed: {exc}")
         self._grid.draw()
         self.render()
         self.fig.canvas.draw_idle()
+
+    def _params_text(self):
+        src = "Noisy" if self.algo_params["input_noisy"] else "GT"
+        return f"input {src}, head/tail {self.algo_params['head_tail_solution']}"
+
+    def _on_set_params(self, _event):
+        """Set Algo Params button: pop the form, keep the result in the doc."""
+        params = self._ask_algo_params()
+        if params is None:          # cancelled (or Tk unavailable)
+            return
+        self.algo_params = algo.algo_params(override=params)
+        # Persist with the document so Save JSON exports the parameters even
+        # before a solve (a solve rewrites the block anyway).
+        self.doc["Algorithm_parameters"] = dict(self.algo_params)
+        self._status.set_text(self._status_text()
+                              + f"  [params: {self._params_text()}]")
+        self.fig.canvas.draw_idle()
+
+    def _ask_algo_params(self):
+        """Modal algorithm-parameters form; returns a params dict or None.
+
+        Current parameters: "Input Type: Noisy" checkbox and the "Head/Tail
+        solution" dropdown (#1 / #2 / Average). The form will grow with the
+        algorithm.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            root = tk.Tk()
+            root.title("Algorithm parameters")
+            root.resizable(False, False)
+            noisy = tk.BooleanVar(root, value=self.algo_params["input_noisy"])
+            head_tail = tk.StringVar(
+                root, value=self.algo_params["head_tail_solution"])
+            frm = ttk.Frame(root, padding=12)
+            frm.grid()
+            ttk.Checkbutton(frm, text="Input Type: Noisy", variable=noisy) \
+                .grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            ttk.Label(frm, text="Head/Tail solution:") \
+                .grid(row=1, column=0, sticky="w")
+            ttk.Combobox(frm, textvariable=head_tail, state="readonly",
+                         values=algo.HEAD_TAIL_OPTIONS, width=9) \
+                .grid(row=1, column=1, sticky="w", padx=(8, 0))
+            result = {}
+
+            def _ok():
+                result["params"] = {"input_noisy": bool(noisy.get()),
+                                    "head_tail_solution": head_tail.get()}
+                root.destroy()
+
+            ttk.Button(frm, text="OK", command=_ok) \
+                .grid(row=2, column=0, pady=(12, 0))
+            ttk.Button(frm, text="Cancel", command=root.destroy) \
+                .grid(row=2, column=1, pady=(12, 0))
+            root.grab_set()
+            root.mainloop()
+            return result.get("params")
+        except Exception:
+            return None
 
     def _on_save(self, _event):
         path = self._ask_save()
@@ -712,6 +864,19 @@ class AircraftViewer:
         except Exception:
             return None
 
+    @staticmethod
+    def _show_info(title, message):
+        """Modal info box (OK button only); no-op if Tk is unavailable."""
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(title, message, parent=root)
+            root.destroy()
+        except Exception:
+            pass
+
     def _ask_save(self):
         """Save dialog, pre-filled with the currently loaded JSON path."""
         try:
@@ -745,6 +910,8 @@ class AircraftViewer:
         self.ax.clear()
         if self.view == "2D":
             self._render_2d()
+        elif self.view == "results2d":
+            self._render_results_2d()
         else:
             self._render_pinhole()
 
@@ -785,6 +952,7 @@ class AircraftViewer:
 
         self._draw_segment_arrow(["P1_tail", "P2_nose"], BODY_ARROW)
         self._draw_segment_arrow(["P3_left_wing", "P4_right_wing"], WING_ARROW)
+        self._draw_fin_2d()
         self._draw_velocity_arrow()
         if self.show_legends:
             self._draw_legends()
@@ -798,6 +966,143 @@ class AircraftViewer:
         self.ax.annotate("", xy=tuple(p_to), xytext=tuple(p_from),
                          arrowprops=dict(arrowstyle="-|>", color=color, lw=2.0,
                                          shrinkA=6, shrinkB=6), zorder=2)
+
+    def _draw_fin_2d(self):
+        """Projected tail fin in the 2D view (same variant as the body arrow).
+
+        Derived from 3D data, so it is skipped for 2D-only variants
+        (e.g. Noisy_GT, which has no 3D keypoints).
+        """
+        v = self._priority_variant_2d(["P1_tail", "P2_nose"])
+        if v is None:
+            return
+        seg = self._fin_segment(v)
+        if seg is None:
+            return
+        fx, fy, cx, cy = aio.camera_intrinsics(self.doc["Camera_parameters"])
+        a = aio.project_pixel(seg[0], fx, fy, cx, cy)
+        b = aio.project_pixel(seg[1], fx, fy, cx, cy)
+        self.ax.plot([a[0], b[0]], [a[1], b[1]], color=BODY_ARROW, lw=2.0,
+                     solid_capstyle="round", zorder=2)
+
+    # ---------------------------------------------- 2D results view (f) #
+    def _projected_computed_2d(self):
+        """{el: pixel} — the Computed 3D points reprojected to the image."""
+        fx, fy, cx, cy = aio.camera_intrinsics(self.doc["Camera_parameters"])
+        out = {}
+        for el in KEYPOINTS:
+            P = self.point3d(el, "Computed")
+            if P is None or P[2] <= 1e-9:
+                continue
+            out[el] = aio.project_pixel(P, fx, fy, cx, cy)
+        return out
+
+    def _results2d_error_text(self):
+        """Pixel |err| table: solve-source 2D vs reprojected Computed, or None.
+
+        The reference variant is the one that fed the last solve (GT or
+        Noisy_GT); without a solve this session there is no reference. The
+        numbers are the same table the solver writes into Results.errors_2D_px
+        (recomputed live, so later noise presses show up).
+        """
+        src = self._last_solve_source
+        if src is None:
+            return None
+        errs = algo.reprojection_errors_px(self.doc, src)
+        if errs is None:
+            return None
+        lines = [f"|err| (px) vs {VARIANT_SHORT[src]}"]
+        lines += [f"  {name:<14s}{e:8.2f}" for name, e in errs.items()]
+        return "\n".join(lines)
+
+    def _render_results_2d(self):
+        """2D results: GT + Noisy_GT pixels vs the reprojected Computed
+        points, with the pixel error norm against the solve's source."""
+        ax = self.ax
+        ax.set_axis_on()
+        cam = self.doc["Camera_parameters"]
+        W, H = cam["W_pixels"], cam["H_pixels"]
+        fx, fy, cx, cy = aio.camera_intrinsics(cam)
+
+        ax.add_patch(Rectangle((0, 0), W, H, fill=False,
+                               edgecolor="gray", linewidth=1.0))
+        ax.set_xlim(-0.05 * W, 1.05 * W)
+        ax.set_ylim(1.05 * H, -0.05 * H)     # image convention: v points down
+        ax.set_aspect("equal")
+        ax.set_xlabel("u (px)")
+        ax.set_ylabel("v (px)")
+        ax.set_title("2D results — GT / Noisy vs projected Computed (pixels)")
+        ax.grid(True, linestyle=":", alpha=0.4)
+
+        def marker(p, el, v, alpha=1.0):
+            style = VARIANT_MARKERS[v]
+            color = POINT_COLORS[el]
+            ax.plot(p[0], p[1], linestyle="none", marker=style["marker"],
+                    markersize=10, markeredgecolor=color,
+                    markerfacecolor=(color if style["filled"] else "none"),
+                    markeredgewidth=1.6, alpha=alpha, zorder=3)
+
+        def arrow(a, b, color, lw, alpha=1.0):
+            ax.annotate("", xy=tuple(b), xytext=tuple(a),
+                        arrowprops=dict(arrowstyle="-|>", color=color, lw=lw,
+                                        shrinkA=6, shrinkB=6, alpha=alpha),
+                        zorder=2)
+
+        def fin_px(variant, alpha=1.0):
+            seg = self._fin_segment(variant)
+            if seg is None:
+                return
+            a = aio.project_pixel(seg[0], fx, fy, cx, cy)
+            b = aio.project_pixel(seg[1], fx, fy, cx, cy)
+            ax.plot([a[0], b[0]], [a[1], b[1]], color=BODY_ARROW, lw=2.0,
+                    solid_capstyle="round", alpha=alpha, zorder=2)
+
+        # Measured pixels: GT (filled) and Noisy_GT (open) + GT overlay.
+        for v in ("GT", "Noisy_GT"):
+            for el in KEYPOINTS:
+                p = self.point2d(el, v)
+                if p is not None:
+                    marker(p, el, v)
+        pg = {el: self.point2d(el, "GT") for el in KEYPOINTS}
+        if pg["P1_tail"] is not None and pg["P2_nose"] is not None:
+            arrow(pg["P1_tail"], pg["P2_nose"], BODY_ARROW, 2.0)
+        if pg["P3_left_wing"] is not None and pg["P4_right_wing"] is not None:
+            arrow(pg["P3_left_wing"], pg["P4_right_wing"], WING_ARROW, 1.6)
+        fin_px("GT")
+
+        # Reprojected Computed points + overlay at reduced alpha.
+        proj = self._projected_computed_2d()
+        for el, p in proj.items():
+            marker(p, el, "Computed", alpha=RESULTS_PT_ALPHA)
+        if "P1_tail" in proj and "P2_nose" in proj:
+            arrow(proj["P1_tail"], proj["P2_nose"], BODY_ARROW, 2.0,
+                  alpha=RESULTS_SEG_ALPHA)
+        if "P3_left_wing" in proj and "P4_right_wing" in proj:
+            arrow(proj["P3_left_wing"], proj["P4_right_wing"],
+                  WING_ARROW, 1.6, alpha=RESULTS_SEG_ALPHA)
+        fin_px("Computed", alpha=RESULTS_SEG_ALPHA)
+
+        # Dotted reference -> reprojection connectors (reference = the solve
+        # source when known, else GT).
+        src = self._last_solve_source or "GT"
+        for el, p in proj.items():
+            ref = self.point2d(el, src)
+            if ref is not None:
+                ax.plot([ref[0], p[0]], [ref[1], p[1]], color="#777777",
+                        lw=0.8, linestyle=":", zorder=1)
+
+        err = self._results2d_error_text()
+        if err is not None:
+            ax.text(0.01, 0.02, err, transform=ax.transAxes, va="bottom",
+                    fontsize=8, family="monospace", color="#222222",
+                    bbox=dict(boxstyle="round,pad=0.4", facecolor="#f8f8f2",
+                              edgecolor="#888888", alpha=0.9))
+        if not proj:
+            ax.text(0.99, 0.02, "no Computed data — press Solve",
+                    transform=ax.transAxes, ha="right", fontsize=9,
+                    color="#aa3333")
+        if self.show_legends:
+            self._draw_legends()
 
     def _draw_velocity_arrow(self):
         # One arrow per checked variant (non-GT fainter), anchored at that
@@ -854,8 +1159,12 @@ class AircraftViewer:
         """Virtual-space constructs for the scheme (see SCHEME_* constants).
 
         Returns (plane_corners 4x3, centre 3, map3d, map2d) where
-        map3d(P) -> virtual 3D point and map2d(el, variant) -> point on the
-        virtual plane (ray intersection; pixel-mapped fallback), or None.
+        map3d(P) -> virtual 3D point (on the camera ray through its own pixel
+        projection) and map2d(el, variant) -> point on the virtual plane
+        (stored pixels mapped linearly; ray ∩ plane fallback), or None.
+        Consequence: the camera -> P_i ray crosses the plane exactly at the
+        drawn p_i whenever the stored pixels match the 3D point's projection
+        (guaranteed for GT by the on-load consistency check).
 
         Normally the mapping re-anchors to the current ref variant each render.
         In the Change-GT view the anchor is FROZEN at entry, so moving the GT
@@ -880,7 +1189,24 @@ class AircraftViewer:
         fx, fy, cx, cy = aio.camera_intrinsics(cam)
 
         def map3d(Pt):
-            return Qc + s_air * (np.asarray(Pt) - C3)
+            """Virtual 3D point, placed ON the camera ray through its own
+            pixel projection.
+
+            The affine map (Qc + s_air*(P - C3)) sets the virtual depth, but
+            its x/y would miss the pixel-mapped plane point: the scheme uses
+            an exaggerated FOV, so scale+shift and true projection disagree.
+            Re-basing the point onto the ray through the linear pixel map of
+            its real projection makes camera -> P_i rays cross the plane
+            exactly at p_i.
+            """
+            Pt = np.asarray(Pt, dtype=float)
+            Q_aff = Qc + s_air * (Pt - C3)
+            if Pt[2] > 1e-9 and Q_aff[2] > 1e-9:
+                px = aio.project_pixel(Pt, fx, fy, cx, cy)
+                hit = np.array([(px[0] - cx) / (W / 2.0) * a,
+                                (px[1] - cy) / (H / 2.0) * b, fv])
+                return hit * (Q_aff[2] / fv)
+            return Q_aff                      # degenerate: affine fallback
 
         def map2d(el, variant):
             px = self.point2d(el, variant)        # stored pixels: 2D data (and
@@ -1072,6 +1398,24 @@ class AircraftViewer:
             arrow(self._scr(map2d("P3_left_wing", v2w)),
                   self._scr(map2d("P4_right_wing", v2w)), WING_ARROW, 1.1)
 
+        # Tail fin (orientation cue): bold on the virtual aircraft, thin on
+        # the plane. on_plane(): map3d points sit on their own pixel ray, so
+        # the ray \cap plane point IS the projected fin.
+        def on_plane(P):
+            Q = map3d(P)
+            return Q * (SCHEME_FV / Q[2])
+
+        if v3 is not None:
+            seg = self._fin_segment(v3)
+            if seg is not None:
+                fa, fb = self._scr(map3d(seg[0])), self._scr(map3d(seg[1]))
+                ax.plot([fa[0], fb[0]], [fa[1], fb[1]], color=BODY_ARROW,
+                        lw=2.0, solid_capstyle="round", zorder=4)
+                pts_scr.append(fb)
+                pa, pb = self._scr(on_plane(seg[0])), self._scr(on_plane(seg[1]))
+                ax.plot([pa[0], pb[0]], [pa[1], pb[1]], color=BODY_ARROW,
+                        lw=1.1, solid_capstyle="round", zorder=3)
+
         # Local aircraft axes (GT-anchored, origin at the aircraft centre).
         la = self._local_axes_virtual(map3d)
         if la is not None:
@@ -1259,6 +1603,22 @@ class AircraftViewer:
                 b = self._to3d(map2d(els[1], vv))
             quiver(a, b, col, lw)
 
+        # Tail fin (orientation cue): bold on the virtual aircraft, thin on
+        # the plane (map3d points sit on their own pixel ray, so the
+        # ray \cap plane point IS the projected fin).
+        vfin = self._priority_visible("3D", ["P1_tail", "P2_nose"])
+        if vfin is not None:
+            seg = self._fin_segment(vfin)
+            if seg is not None:
+                fa, fb = P3(map3d(seg[0])), P3(map3d(seg[1]))
+                ax.plot([fa[0], fb[0]], [fa[1], fb[1]], [fa[2], fb[2]],
+                        color=BODY_ARROW, lw=2.0, solid_capstyle="round")
+                Qa, Qb = map3d(seg[0]), map3d(seg[1])
+                pa = P3(Qa * (SCHEME_FV / Qa[2]))
+                pb = P3(Qb * (SCHEME_FV / Qb[2]))
+                ax.plot([pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
+                        color=BODY_ARROW, lw=1.1, solid_capstyle="round")
+
         # Local aircraft axes (GT-anchored, origin at the aircraft centre).
         la = self._local_axes_virtual(map3d)
         if la is not None:
@@ -1324,42 +1684,17 @@ class AircraftViewer:
 
     # ---------------------------------------------- 3D results view (e) #
     def _aircraft_stats(self, variant):
-        """Summary metrics of one variant's aircraft, or None without a body.
+        """Summary metrics of one variant's aircraft (see main.aircraft_stats).
 
-        Returns {"xyz": centre (m), "body_len", and -- when wing points exist
-        -- "wing_span", "cross" (position of the wings crossing along the
-        body: 0 = tail, 1 = nose, clamped to [0, 1]) and "ypr" (yaw/pitch/
-        roll, degrees, from ru.compute_6dof)}. For non-Computed1 variants the
-        wing points fall back to Computed1 (the only wings solution).
+        Shared with the solver so the on-screen table and the Results block
+        saved in the JSON agree.
         """
-        P1 = self.point3d("P1_tail", variant)
-        P2 = self.point3d("P2_nose", variant)
-        if P1 is None or P2 is None:
-            return None
-        P3 = self.point3d("P3_left_wing", variant)
-        P4 = self.point3d("P4_right_wing", variant)
-        if variant != "Computed1":
-            P3 = P3 if P3 is not None else self.point3d("P3_left_wing",
-                                                        "Computed1")
-            P4 = P4 if P4 is not None else self.point3d("P4_right_wing",
-                                                        "Computed1")
-        out = {"xyz": 0.5 * (P1 + P2),
-               "body_len": float(np.linalg.norm(P2 - P1))}
-        if P3 is not None and P4 is not None:
-            out["wing_span"] = float(np.linalg.norm(P4 - P3))
-            body = P2 - P1
-            t = float((0.5 * (P3 + P4) - P1) @ body / (body @ body))
-            out["cross"] = min(1.0, max(0.0, t))
-            pose = ru.compute_6dof(P1, P2, P3, P4)
-            out["ypr"] = np.degrees([pose["yaw"], pose["pitch"],
-                                     pose["roll"]])
-        return out
+        return algo.aircraft_stats(self.doc, variant)
 
-    RESULTS_TABLE_COLS = [("GT", "GT"), ("Calc1", "Computed1"),
-                          ("Calc2", "Computed2")]
+    RESULTS_TABLE_COLS = [("GT", "GT"), ("Calc", "Computed")]
 
     def _results_table_text(self):
-        """Monospace GT/Calc1/Calc2 results table for the 3D results view."""
+        """Monospace GT/Calc results table for the 3D results view."""
         stats = {lbl: self._aircraft_stats(v)
                  for lbl, v in self.RESULTS_TABLE_COLS}
         wid = 21
@@ -1389,19 +1724,6 @@ class AircraftViewer:
         return "\n".join(name.ljust(11) + "".join(v.rjust(wid) for v in vals)
                          for name, vals in rows)
 
-    def _results_computed_variant(self):
-        """Computed variant compared against GT in the results view.
-
-        Computed2 wins when any 3D cell selects it (and has data); otherwise
-        Computed1.
-        """
-        for v in ("Computed2", "Computed1"):
-            for el in KEYPOINTS:
-                c = self._col_index(el, "3D")
-                if self._cell_checked(c, v) and self.point3d(el, v) is not None:
-                    return v
-        return "Computed1"
-
     def _render_results_3d(self):
         ax = self.ax3d
         keep = None
@@ -1411,8 +1733,7 @@ class AircraftViewer:
         self._scene3d_kind = "results"
         ax.clear()
         ax.set_proj_type("ortho")
-        cv = self._results_computed_variant()
-        ax.set_title(f"3D results — GT vs {cv} "
+        ax.set_title("3D results — GT vs Computed "
                      "(camera coordinates, metres)")
         # Data axes are the _to3d permutation of camera coordinates.
         ax.set_xlabel("Z (m)")
@@ -1447,17 +1768,22 @@ class AircraftViewer:
             if "P3_left_wing" in q3 and "P4_right_wing" in q3:
                 arrow(q3["P3_left_wing"], q3["P4_right_wing"], WING_ARROW,
                       2.0, alpha_seg)
+            fin = self._fin_from_points(
+                *(points[el][0] if el in points else None
+                  for el in ("P1_tail", "P2_nose",
+                             "P3_left_wing", "P4_right_wing")))
+            if fin is not None:
+                fa, fb = P3(fin[0]), P3(fin[1])
+                ax.plot([fa[0], fb[0]], [fa[1], fb[1]], [fa[2], fb[2]],
+                        color=BODY_ARROW, lw=2.0, solid_capstyle="round",
+                        alpha=alpha_seg)
             return q3
 
         gt = {el: (self.point3d(el, "GT"), "GT") for el in KEYPOINTS
               if self.point3d(el, "GT") is not None}
-        comp = {}
-        for el in KEYPOINTS:
-            P, v = self.point3d(el, cv), cv
-            if P is None and cv != "Computed1":   # wings only have Computed1
-                P, v = self.point3d(el, "Computed1"), "Computed1"
-            if P is not None:
-                comp[el] = (P, v)
+        comp = {el: (self.point3d(el, "Computed"), "Computed")
+                for el in KEYPOINTS
+                if self.point3d(el, "Computed") is not None}
 
         gt_q = draw(gt, 1.0, 1.0)
         for el, q in gt_q.items():
@@ -1472,15 +1798,14 @@ class AircraftViewer:
                         color="#777777", lw=0.8, linestyle=":")
 
         # Results table (rows XYZ/YPR/BodyLength/WingsSpan/CrossPoint,
-        # columns GT / Calc1 / Calc2).
+        # columns GT / Calc).
         ax.text2D(0.01, 0.01, self._results_table_text(),
                   transform=ax.transAxes, va="bottom", fontsize=8,
                   family="monospace", color="#222222",
                   bbox=dict(boxstyle="round,pad=0.4", facecolor="#f8f8f2",
                             edgecolor="#888888", alpha=0.9))
         if not comp:
-            ax.text2D(0.99, 0.30,
-                      "no Computed data — press Solve GT / Solve Noisy",
+            ax.text2D(0.99, 0.30, "no Computed data — press Solve",
                       transform=ax.transAxes, ha="right", fontsize=9,
                       color="#aa3333")
 
@@ -1636,10 +1961,106 @@ class AircraftViewer:
         self.render()
         self.fig.canvas.draw_idle()
 
+    def _shift_wings_gt(self, d_cross):
+        """Slide the GT wing pair along the body axis (changes CrossPoint).
+
+        ``d_cross`` is in CrossPoint units (0 = tail, 1 = nose); the result
+        is clamped to [0, 1]. A non-rigid GT edit: only P3/P4 move; the body,
+        velocity and range stay put, and the wings' GT 2D projections are
+        re-derived.
+        """
+        P1 = self.point3d("P1_tail", "GT")
+        P2 = self.point3d("P2_nose", "GT")
+        P3w = self.point3d("P3_left_wing", "GT")
+        P4w = self.point3d("P4_right_wing", "GT")
+        if any(p is None for p in (P1, P2, P3w, P4w)):
+            return
+        body = P2 - P1
+        L2 = float(np.dot(body, body))
+        if L2 < 1e-12:
+            return
+        Wm = 0.5 * (P3w + P4w)
+        cur = float(np.dot(Wm - P1, body) / L2)
+        new = float(np.clip(cur + d_cross, 0.0, 1.0))
+        if abs(new - cur) < 1e-12:
+            return                      # already at the clamp limit
+        self._push_undo()
+        shift = (new - cur) * body
+        for el in ("P3_left_wing", "P4_right_wing"):
+            self.doc["Coordinates_3D"][el]["GT"] = \
+                aio.vec3(self.point3d(el, "GT") + shift)
+        self._refresh_gt_derived()
+        self.render()
+        self.fig.canvas.draw_idle()
+
+    def _scale_wings_gt(self, factor):
+        """Scale the GT wingspan about the wings midpoint.
+
+        Span changes by ``factor``; the wings midpoint (and so CrossPoint),
+        the body, velocity and range stay put. Clamped at GT_SIZE_MIN.
+        """
+        P3w = self.point3d("P3_left_wing", "GT")
+        P4w = self.point3d("P4_right_wing", "GT")
+        if P3w is None or P4w is None:
+            return
+        span = float(np.linalg.norm(P4w - P3w))
+        if span < 1e-12 or factor * span < GT_SIZE_MIN:
+            return
+        self._push_undo()
+        Wm = 0.5 * (P3w + P4w)
+        for el, P in (("P3_left_wing", P3w), ("P4_right_wing", P4w)):
+            self.doc["Coordinates_3D"][el]["GT"] = \
+                aio.vec3(Wm + factor * (P - Wm))
+        self._refresh_gt_derived()
+        self.render()
+        self.fig.canvas.draw_idle()
+
+    def _scale_body_gt(self, factor):
+        """Scale the GT body about its midpoint, keeping the wings' station.
+
+        Body length changes by ``factor`` around the (fixed) centre, so the
+        range is untouched. The wing pair is shifted so its CrossPoint
+        parameter is preserved -- changing the length does not change where
+        the wings sit on the fuselage. Clamped at GT_SIZE_MIN.
+        """
+        P1 = self.point3d("P1_tail", "GT")
+        P2 = self.point3d("P2_nose", "GT")
+        P3w = self.point3d("P3_left_wing", "GT")
+        P4w = self.point3d("P4_right_wing", "GT")
+        if any(p is None for p in (P1, P2, P3w, P4w)):
+            return
+        body = P2 - P1
+        L2 = float(np.dot(body, body))
+        if L2 < 1e-12 or factor * np.sqrt(L2) < GT_SIZE_MIN:
+            return
+        self._push_undo()
+        C = 0.5 * (P1 + P2)
+        t = float(np.dot(0.5 * (P3w + P4w) - P1, body) / L2)   # wings station
+        P1n, P2n = C + factor * (P1 - C), C + factor * (P2 - C)
+        self.doc["Coordinates_3D"]["P1_tail"]["GT"] = aio.vec3(P1n)
+        self.doc["Coordinates_3D"]["P2_nose"]["GT"] = aio.vec3(P2n)
+        shift = (P1n + t * (P2n - P1n)) - 0.5 * (P3w + P4w)
+        for el, P in (("P3_left_wing", P3w), ("P4_right_wing", P4w)):
+            self.doc["Coordinates_3D"][el]["GT"] = aio.vec3(P + shift)
+        self._refresh_gt_derived()
+        self.render()
+        self.fig.canvas.draw_idle()
+
     def _on_key_edit(self, k):
         s, r = GT_MOVE_STEP, GT_ROT_STEP
         if k == "ctrl+z":
             self._undo_gt()
+            return
+        if k in ("w", "s"):               # wings slide along the body
+            self._shift_wings_gt(GT_CROSS_STEP if k == "w" else -GT_CROSS_STEP)
+            return
+        if k in ("a", "d"):               # wingspan
+            self._scale_wings_gt(GT_SCALE_STEP if k == "d"
+                                 else 1.0 / GT_SCALE_STEP)
+            return
+        if k in ("q", "e"):               # body length
+            self._scale_body_gt(GT_SCALE_STEP if k == "e"
+                                else 1.0 / GT_SCALE_STEP)
             return
         if k in ("0", "home"):            # reset camera to the entry view
             view = self._view3d_aircraft45()

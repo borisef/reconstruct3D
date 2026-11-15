@@ -65,9 +65,11 @@ def test_save_produces_valid_json(viewer, tmp_path):
 
 def test_save_after_solve_contains_computed(viewer, tmp_path):
     from main import solve_document
-    solve_document(viewer.doc, source="GT")
+    solve_document(viewer.doc, params={"input_noisy": False})
     out = str(tmp_path / "solved.json")
     viewer._ask_save = lambda: out
     viewer._on_save(None)
     saved = aio.load_json(out)
-    assert saved["Coordinates_3D"]["P1_tail"]["Computed1"] is not None
+    assert saved["Coordinates_3D"]["P1_tail"]["Computed"] is not None
+    assert saved["Algorithm_parameters"]["input_noisy"] is False
+    assert saved["Results"]["source"] == "GT"

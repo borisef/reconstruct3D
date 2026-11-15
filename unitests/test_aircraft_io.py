@@ -16,7 +16,7 @@ def test_keypoints_2d_count():
     assert len(aio.KEYPOINTS_2D) == 4
 
 def test_variants_count():
-    assert len(aio.VARIANTS) == 5
+    assert aio.VARIANTS == ["GT", "Noisy_GT", "Computed"]
 
 def test_blocks_present():
     for b in ["Camera_parameters", "Coordinates_3D", "Coordinates_2D",
@@ -76,14 +76,14 @@ def test_variant_block_gt_set():
     p = aio.vec3([1, 2, 3])
     b = aio.variant_block(GT=p)
     assert b["GT"] == p
-    for v in ["Noisy_GT", "Computed1", "Computed2", "Computed3"]:
+    for v in ["Noisy_GT", "Computed"]:
         assert b[v] is None
 
 def test_variant_block_multiple_set():
     b = aio.variant_block(GT=aio.vec3([1, 2, 3]), Noisy_GT=aio.vec3([4, 5, 6]))
     assert b["GT"] is not None
     assert b["Noisy_GT"] is not None
-    assert b["Computed1"] is None
+    assert b["Computed"] is None
 
 def test_variant_block_3d_has_no_noisy_gt():
     b = aio.variant_block(variants=aio.VARIANTS_3D, GT=aio.vec3([1, 2, 3]))
@@ -92,7 +92,7 @@ def test_variant_block_3d_has_no_noisy_gt():
     assert b["GT"] is not None
 
 def test_variants_3d_constant():
-    assert aio.VARIANTS_3D == ["GT", "Computed1", "Computed2", "Computed3"]
+    assert aio.VARIANTS_3D == ["GT", "Computed"]
 
 # ── camera model ───────────────────────────────────────────────────────────────
 

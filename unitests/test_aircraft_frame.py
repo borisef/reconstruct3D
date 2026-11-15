@@ -176,11 +176,11 @@ def test_local_keypoints_null_variant_returns_none():
     P1, P2, P3, P4, _, _ = _gt_points()
     doc = {
         "Coordinates_3D": {
-            "P1_tail":       aio.variant_block(GT=aio.vec3(P1), Computed1=None),
-            "P2_nose":       aio.variant_block(GT=aio.vec3(P2), Computed1=None),
-            "P3_left_wing":  aio.variant_block(GT=aio.vec3(P3), Computed1=None),
-            "P4_right_wing": aio.variant_block(GT=aio.vec3(P4), Computed1=None),
+            "P1_tail":       aio.variant_block(GT=aio.vec3(P1), Computed=None),
+            "P2_nose":       aio.variant_block(GT=aio.vec3(P2), Computed=None),
+            "P3_left_wing":  aio.variant_block(GT=aio.vec3(P3), Computed=None),
+            "P4_right_wing": aio.variant_block(GT=aio.vec3(P4), Computed=None),
         }
     }
-    result = local_keypoints(doc, variant="Computed1")
+    result = local_keypoints(doc, variant="Computed")
     assert all(v is None for v in result.values())

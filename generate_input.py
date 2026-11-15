@@ -8,8 +8,8 @@ The ground truth is the same synthetic aircraft used by ``main.py``: a target
 ~2 km away with a 30 m body and 40 m wingspan. We project its four keypoints to
 pixel coordinates, derive the velocity vector and range, then add a small amount
 of deterministic Gaussian noise to populate ``Noisy_GT`` for the algorithm
-inputs (2D pixels, velocity, range). 3D keypoints carry no Noisy_GT. All
-``Computed*`` variants are left ``null`` -- they will be filled in by the later
+inputs (2D pixels, velocity, range). 3D keypoints carry no Noisy_GT. The
+``Computed`` variant is left ``null`` -- it will be filled in by the later
 solve step.
 """
 

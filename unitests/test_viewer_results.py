@@ -22,7 +22,7 @@ def viewer():
 
 @pytest.fixture
 def solved_viewer(viewer):
-    solve_document(viewer.doc, source="Noisy_GT")
+    solve_document(viewer.doc)   # defaults: Noisy_GT input, head/tail #1
     viewer._sync_visibility()
     viewer._grid.draw()
     viewer._on_view("3D results")
@@ -46,24 +46,6 @@ def test_renders_without_computed_data(viewer):
 def test_renders_with_computed_data(solved_viewer):
     assert solved_viewer.view == "results"
 
-# ── computed-variant selection rule ───────────────────────────────────────────
-
-def test_default_computed_variant_is_computed1(solved_viewer):
-    assert solved_viewer._results_computed_variant() == "Computed1"
-
-def test_computed2_selected_wins(solved_viewer):
-    c = solved_viewer._col_index("P1_tail", "3D")
-    solved_viewer.visible[(c, "Computed2")] = True
-    assert solved_viewer._results_computed_variant() == "Computed2"
-
-def test_computed2_checked_without_data_falls_back(viewer):
-    # No solve has run: Computed2 is null everywhere, so even a (stale)
-    # checked cell must not select it.
-    c = viewer._col_index("P1_tail", "3D")
-    viewer.visible[(c, "Computed2")] = True
-    viewer._on_view("3D results")
-    assert viewer._results_computed_variant() == "Computed1"
-
 # ── framing: all aircraft points in view, real-metre scale ────────────────────
 
 def test_limits_fit_aircraft_scale(solved_viewer):
@@ -75,7 +57,7 @@ def test_all_points_inside_limits(solved_viewer):
     ax = solved_viewer.ax3d
     xl, yl, zl = ax.get_xlim(), ax.get_ylim(), ax.get_zlim()
     for el in ["P1_tail", "P2_nose", "P3_left_wing", "P4_right_wing"]:
-        for variant in ["GT", "Computed1"]:
+        for variant in ["GT", "Computed"]:
             P = solved_viewer.point3d(el, variant)
             q = solved_viewer._to3d(P)
             assert xl[0] <= q[0] <= xl[1]
@@ -140,30 +122,30 @@ def test_stats_ypr_present_and_finite(viewer):
     s = viewer._aircraft_stats("GT")
     assert "ypr" in s and np.all(np.isfinite(s["ypr"]))
 
-def test_stats_computed2_wings_fall_back_to_computed1(solved_viewer):
-    s = solved_viewer._aircraft_stats("Computed2")
+def test_stats_computed_full_after_solve(solved_viewer):
+    s = solved_viewer._aircraft_stats("Computed")
     assert s is not None
-    assert "wing_span" in s and "cross" in s   # via Computed1 wings
+    assert "wing_span" in s and "cross" in s and "ypr" in s
 
 def test_stats_none_without_body(viewer):
-    assert viewer._aircraft_stats("Computed1") is None
+    assert viewer._aircraft_stats("Computed") is None
 
 def test_table_has_all_rows_and_columns(solved_viewer):
     txt = solved_viewer._results_table_text()
-    for token in ["GT", "Calc1", "Calc2", "XYZ (m)", "YPR (deg)",
+    for token in ["GT", "Calc", "XYZ (m)", "YPR (deg)",
                   "BodyLength", "WingsSpan", "CrossPoint"]:
         assert token in txt
 
 def test_table_dashes_without_computed(viewer):
     txt = viewer._results_table_text()
-    # GT column filled, Calc1/Calc2 blank markers present
+    # GT column filled, Calc blank markers present
     assert "30.00" in txt       # GT body length
     assert "0.500" in txt       # GT cross point
     assert "-" in txt
 
 def test_table_calc_values_close_to_gt_after_gt_solve(viewer):
-    solve_document(viewer.doc, source="GT")
-    s1 = viewer._aircraft_stats("Computed1")
+    solve_document(viewer.doc, params={"input_noisy": False})
+    s1 = viewer._aircraft_stats("Computed")
     sg = viewer._aircraft_stats("GT")
     assert abs(s1["body_len"] - sg["body_len"]) < 0.01
     assert abs(s1["wing_span"] - sg["wing_span"]) < 0.01

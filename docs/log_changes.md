@@ -444,3 +444,160 @@ schema, the generator, the JSON files and the GUI.
 - Tests: Noisy_GT-3D expectations replaced (`"Noisy_GT" not in` 3D blocks,
   `VARIANTS_3D` schema check, grid cell disabled for 3D points, toggle test
   moved to a 2D column) + 2 new `aircraft_io` tests. Suite: 192 passing.
+
+## 2026-11-14
+
+### GUI: 2D GT auto-corrected to match the 3D GT projection on load
+The 2D GT pixels must always be the pinhole projection of the 3D GT points.
+Loaded JSON files may violate this; the viewer now verifies and corrects it.
+- `_check_gt_2d_consistency()`: for every keypoint with a 3D GT (Z > 0), the
+  stored 2D GT is compared to the reprojection; values further off than
+  `GT2D_TOL_PX` (1e-6 px) — or missing — are re-derived in place. Runs on
+  construction and on every Load JSON.
+- If anything was corrected, `_show_info()` pops a modal info box (OK button
+  only) listing the corrected keypoints and noting that the in-memory
+  document is now consistent (Save JSON to persist). Tk-based, same
+  monkeypatchable pattern as the open/save dialogs; no-op when Tk is
+  unavailable.
+- GT edits were already consistent (`_refresh_gt_derived` re-projects after
+  every Change-GT move); noise touches Noisy_GT only.
+- 9 new tests in `unitests/test_viewer_gt2d.py` (consistent file untouched,
+  stale/missing 2D GT fixed to the exact reprojection, no 3D GT -> left
+  alone, other variants untouched, info box on correction and silence
+  otherwise, corrupt file corrected via Load and via construction).
+  Suite: 201 passing.
+
+### Scheme views: camera->P_i rays now cross the plane exactly at p_i
+The virtual scheme mapped 3D points affinely (`Qc + s_air*(P - C3)`); with
+the exaggerated scheme FOV that mapping disagrees with true projection, so
+the ray from [0,0,0] to the mapped P_i missed the pixel-mapped p_i marker on
+the image plane (visible in the Pinhole/3D-interactive views).
+- `map3d` is now projection-consistent: the affine map still sets the
+  virtual **depth**, but the point is re-based onto the camera ray through
+  the linear pixel map of its own true projection
+  (`hit(project_pixel(P)) * z_aff/fv`). Rays therefore hit the plane exactly
+  at p_i whenever the stored pixels match the 3D point's projection — which
+  the on-load GT consistency check now guarantees for GT; Computed points
+  align with their own reprojection automatically. Noisy_GT plane markers
+  (pure measurements) remain intentionally off the GT rays. The aircraft
+  centre still lands exactly on Qc, so framing/anchoring is unchanged.
+- 5 new tests in `unitests/test_viewer_scheme_rays.py` (GT rays through GT
+  plane points, centre == anchor, Computed rays through their reprojection,
+  alignment preserved after Change-GT moves under the frozen anchor, noisy
+  marker off-ray). Suite: 206 passing.
+
+### GUI: vertical tail stabilizer (fin) as an orientation cue
+A derived fin segment (cf. assets/figure1.png) makes the aircraft's
+orientation readable at a glance: from P1_tail along the local +Z ("up")
+direction, `FIN_FRACTION = 0.20` of the body length (6 m for the 30 m GT
+body). Purely visual — nothing is added to the JSON schema.
+- `_fin_from_points(P1, P2, P3, P4)` / `_fin_segment(variant)`:
+  tip = P1 + 0.2*|P2-P1| * normalize((P4-P3) x (P2-P1)); Computed2 wings
+  fall back to Computed1, matching the drawn overlay.
+- Drawn wherever the aircraft is drawn: **2D view** (projected through the
+  camera, same variant as the body arrow; skipped for 2D-only variants like
+  Noisy_GT which have no 3D data), **Pinhole scheme** and **3D interactive /
+  Change GT** (bold on the virtual aircraft + thin on the image plane via
+  the ray \cap plane point), **3D results** (on both the GT and the Computed
+  overlay, at the overlay's alpha). Body colour (red), plain line (no
+  arrowhead).
+- 9 new tests in `unitests/test_viewer_fin.py` (starts at tail, length
+  0.2*body, along local Z, perpendicular to body+wings, rotates with
+  Change-GT edits, None for Noisy_GT/empty variants, Computed2 wings
+  fallback, render smoke across all views). Suite: 215 passing.
+
+### GUI: "2D results" view (f) — reprojected Computed vs measured pixels
+New dropdown option between "3D results" and "Change GT". An image-plane
+comparison: **GT** (filled) and **Noisy_GT** (open) measured pixels, plus the
+selected Computed 3D points **reprojected through the camera** (variant
+markers at the results alpha, with body/wing arrows and the tail fin for
+both the GT and the computed overlay). Computed1 by default, Computed2 when
+its cell is checked; Computed2 wings fall back to Computed1.
+- Pixel-error box (bottom-left): per-keypoint `|measured - reprojected|` in
+  px + mean, measured against **the variant that fed the last solve** (GT or
+  Noisy_GT) — tracked by the re-added `_last_solve_source` (set on a
+  successful solve, cleared on Load). Dotted connectors join each reference
+  pixel to its reprojection. Note the errors are ~0 right after a solve
+  (solutions lie on the source rays) and grow when noise is pressed
+  afterwards, since the reference pixels move.
+- Without Computed data the view shows the measured points and a "press
+  Solve" hint; without a solve this session there is no error reference and
+  the box is omitted.
+- 13 new tests in `unitests/test_viewer_results2d.py` (view key, renders
+  with/without data, reprojection ≈ GT after a GT solve, Computed2 wings
+  fallback, error text vs GT / vs N_GT, ~0 after solve, grows after
+  post-solve noise, source tracking + reset on load). Suite: 228 passing.
+
+### Change-GT view: slide wings along the body (CrossPoint editing)
+New edit controls: **w** slides the GT wing pair toward the nose, **s**
+toward the tail, `GT_CROSS_STEP = 0.05` CrossPoint units per press, clamped
+to [0, 1] (0 = tail, 1 = nose). The plain "s" is freed from matplotlib's
+save keymap (ctrl+s still saves the figure).
+- `_shift_wings_gt(d_cross)`: a non-rigid GT edit — only P3/P4 translate
+  along the body direction by `(new-cur)*|body|`; body points, velocity and
+  range stay put; the wings' GT 2D projections are re-derived
+  (`_refresh_gt_derived`), keeping the 2D GT consistency invariant. Each
+  effective press lands on the undo stack (ctrl+z); a press at the clamp is
+  a no-op and pushes nothing. Wing span/direction are preserved exactly.
+- Help text and the boxed controls legend list the new keys.
+- 11 new tests in `unitests/test_viewer_wings_slide.py` (0.5 start, ±step
+  per key, clamping both ends, body/velocity/range untouched, span and
+  direction preserved, 2D GT reprojected, undo depth semantics).
+  Suite: 239 passing.
+
+### Change-GT view: wingspan (a/d) and body-length (q/e) controls
+Two more non-rigid GT edits, x1.05 per press (`GT_SCALE_STEP`), clamped so
+neither size drops below `GT_SIZE_MIN` (1 m); plain "q" freed from
+matplotlib's quit keymap (ctrl+w still quits).
+- **a / d — wingspan narrower / wider**: `_scale_wings_gt(factor)` scales
+  P3/P4 about the wings midpoint; midpoint, CrossPoint, body, velocity and
+  range untouched.
+- **q / e — body shorter / longer**: `_scale_body_gt(factor)` scales P1/P2
+  about the body midpoint (centre and range untouched) and shifts the wing
+  pair so its **CrossPoint station is preserved** — resizing the fuselage
+  does not move where the wings sit on it; w/s stays the dedicated
+  CrossPoint control.
+- Both land on the undo stack, re-derive the GT 2D projections, and are
+  listed in the help text + boxed controls legend.
+- 13 new tests in `unitests/test_viewer_resize.py` (exact x1.05 scaling both
+  ways, midpoint/cross/body invariants for span, centre/range/span
+  invariants for body, cross-station preservation at 0.75, min clamps, 2D
+  reprojection, velocity untouched, undo). Suite: 252 passing.
+
+## 2026-11-15
+
+### Single-solution refactor: algorithm parameters + Results in the JSON
+- Variants reduced to `GT / Noisy_GT / Computed`: the solver now reports
+  exactly ONE solution per run (`Computed1..3` removed from `aircraft_io`,
+  `main`, the GUI, both sample JSONs and all fallback logic).
+- New `Algorithm_parameters` block (persisted in the document, defaults in
+  `main.DEFAULT_ALGO_PARAMS`): `input_noisy` (True -> solve from Noisy_GT,
+  default on) and `head_tail_solution` (`#1` / `#2` / `Average` -- which of
+  the two-fold-ambiguous body solutions is reported; Average = midpoint).
+- `main.solve_document(doc, params=None)` replaces the `source=` API; merge
+  order is defaults <- doc block <- call params. CLI: `--gt`, `--head-tail`.
+- Output JSON now also carries a `Results` block written at solve time:
+  `source`, `errors_2D_px` (the 2D-results-view pixel-error table incl.
+  mean) and `table_3D` (GT/Computed rows of the 3D-results table: XYZ_m,
+  YPR_deg, BodyLength_m, WingsSpan_m, CrossPoint). Shared helpers
+  `aircraft_stats` / `reprojection_errors_px` / `results_block` live in
+  `main.py` and back both the GUI tables and the saved JSON.
+- GUI: "Solve Noisy" removed; a single "Solve" button runs with the current
+  parameters. New "Set Algo Params" button pops a small Tk form (Input Type:
+  Noisy checkbox; Head/Tail solution dropdown) and stores the result in the
+  document, so Save JSON exports parameters + solution + results together.
+  Results views compare GT vs the single Computed (table columns GT/Calc).
+- Tests updated throughout; new `unitests/test_viewer_algo_params.py`
+  (buttons, parameter state/merge, Solve honouring the form, Results block).
+  Suite: 268 passing.
+
+### Computed 2D keypoints filled at solve time
+- `solve_document` now also writes `Coordinates_2D.*.Computed`: the single
+  Computed 3D solution reprojected through the camera to pixels. The 2D
+  drawing paths are variant-generic, so once filled the computed p1..p4 can
+  be checked in the grid and appear in every view that draws 2D keypoints
+  (2D, Pinhole scheme, 3D interactive, 2D results) with the Computed diamond
+  marker; saved documents carry them alongside GT/Noisy_GT.
+- Tests: solver-side reprojection-equality checks in `test_solve.py`,
+  viewer-side enablement/rendering checks in `test_viewer_algo_params.py`.
+  Suite: 272 passing.

@@ -34,19 +34,19 @@ def test_noisy_gt_cells_enabled_except_3d_points(viewer):
         assert viewer._cell_enabled(c, "Noisy_GT") == (not is_3d_point), \
             f"col {c} ({key},{kind}) Noisy_GT enabled state wrong"
 
-def test_computed1_disabled_for_3d_body(viewer):
+def test_computed_disabled_for_3d_body(viewer):
     c = viewer._col_index("P1_tail", "3D")
-    assert not viewer._cell_enabled(c, "Computed1")
+    assert not viewer._cell_enabled(c, "Computed")
 
-def test_computed1_disabled_for_2d_body(viewer):
+def test_computed_disabled_for_2d_body(viewer):
     c = viewer._col_index("P1_tail", "2D")
-    assert not viewer._cell_enabled(c, "Computed1")
+    assert not viewer._cell_enabled(c, "Computed")
 
 def test_range_scalar_cell_enabled(viewer):
     c = viewer._col_index("range", "scalar")
     assert viewer._cell_enabled(c, "GT")
     assert viewer._cell_enabled(c, "Noisy_GT")
-    assert not viewer._cell_enabled(c, "Computed1")
+    assert not viewer._cell_enabled(c, "Computed")
 
 # ── default visibility: GT only ───────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ def test_default_noisy_gt_not_checked(viewer):
 
 def test_default_computed_not_checked(viewer):
     for c in range(len(COLUMNS)):
-        for v in ["Computed1", "Computed2", "Computed3"]:
+        for v in ["Computed"]:
             assert not viewer._cell_checked(c, v)
 
 # ── toggle ────────────────────────────────────────────────────────────────────
@@ -124,9 +124,9 @@ def test_is_visible_after_toggle(viewer):
 
 def test_sync_drops_checked_null_field(viewer):
     c = viewer._col_index("P1_tail", "3D")
-    viewer.visible[(c, "Computed1")] = True  # force-enable a null field
+    viewer.visible[(c, "Computed")] = True  # force-enable a null field
     viewer._sync_visibility()
-    assert not viewer.visible.get((c, "Computed1"), False)
+    assert not viewer.visible.get((c, "Computed"), False)
 
 # ── data accessors ────────────────────────────────────────────────────────────
 
@@ -134,8 +134,8 @@ def test_point3d_gt_returns_array(viewer):
     P = viewer.point3d("P1_tail", "GT")
     assert P is not None and P.shape == (3,)
 
-def test_point3d_computed1_returns_none(viewer):
-    assert viewer.point3d("P1_tail", "Computed1") is None
+def test_point3d_computed_returns_none(viewer):
+    assert viewer.point3d("P1_tail", "Computed") is None
 
 def test_point2d_gt_returns_array(viewer):
     p = viewer.point2d("P1_tail", "GT")

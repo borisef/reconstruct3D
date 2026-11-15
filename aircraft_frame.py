@@ -14,7 +14,7 @@ The origin is the aircraft centre (the body midpoint, which by construction is
 also the wing midpoint).
 
 The frame is always derived from the *ground-truth* 3D keypoints: GT is the
-internal reference, and every other variant (Computed*) can be expressed in
+internal reference, and every other variant (Computed) can be expressed in
 the same GT-anchored local coordinates for comparison (3D keypoints carry no
 Noisy_GT -- the noisy inputs are 2D + velocity + range only).
 
