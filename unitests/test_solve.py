@@ -36,7 +36,7 @@ def _err(doc, name):
 def test_default_params():
     assert DEFAULT_ALGO_PARAMS == {"input_noisy": True,
                                    "head_tail_solution": "#1"}
-    assert HEAD_TAIL_OPTIONS == ["#1", "#2", "Average"]
+    assert HEAD_TAIL_OPTIONS == ["#1", "#2", "Average", "Joint with wings"]
 
 def test_algo_params_doc_block_wins_over_defaults():
     doc = {"Algorithm_parameters": {"input_noisy": False}}
@@ -106,6 +106,43 @@ def test_wings_independent_of_head_tail_choice():
     for name in ["P3_left_wing", "P4_right_wing"]:
         assert np.allclose(_xyz(d1["Coordinates_3D"][name]["Computed"]),
                            _xyz(d2["Coordinates_3D"][name]["Computed"]))
+
+# ── joint solution option ─────────────────────────────────────────────────────
+
+JOINT = {"input_noisy": False, "head_tail_solution": "Joint with wings"}
+
+def test_joint_is_valid_option():
+    p = algo_params(override={"head_tail_solution": "Joint with wings"})
+    assert p["head_tail_solution"] == "Joint with wings"
+
+def test_joint_gt_solve_recovers_all_points():
+    doc = _doc()
+    solve_document(doc, params=JOINT)
+    for name in aio.KEYPOINTS_3D:
+        assert _err(doc, name) < 0.01, name
+
+def test_joint_fills_all_computed_3d_and_2d():
+    doc = _doc()
+    solve_document(doc, params=JOINT)
+    for name in aio.KEYPOINTS_3D:
+        assert doc["Coordinates_3D"][name]["Computed"] is not None
+    for name in aio.KEYPOINTS_2D:
+        assert doc["Coordinates_2D"][name]["Computed"] is not None
+
+def test_joint_params_persisted():
+    doc = _doc()
+    solve_document(doc, params=JOINT)
+    assert doc["Algorithm_parameters"]["head_tail_solution"] == "Joint with wings"
+    assert doc["Results"]["source"] == "GT"
+
+def test_joint_noisy_solve_has_error_but_is_reasonable():
+    doc = _doc()
+    solve_document(doc, params={"input_noisy": True,
+                                "head_tail_solution": "Joint with wings"})
+    # nonzero (noisy input) but the aircraft is still recovered to ~metres
+    errs = [_err(doc, name) for name in aio.KEYPOINTS_3D]
+    assert max(errs) > 0.0
+    assert max(errs) < 10.0
 
 # ── fill policy ───────────────────────────────────────────────────────────────
 

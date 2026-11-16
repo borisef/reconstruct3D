@@ -24,6 +24,7 @@ I/O. Section references in the docstrings point back to the paper.
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from scipy.optimize import least_squares
 
 
 # --------------------------------------------------------------------------- #
@@ -224,6 +225,90 @@ def wings_solution(u3, v3, u4, v4, V, D):
     P3 = lam3 * d3
     P4 = lam4 * d4
     return P3, P4
+
+
+# --------------------------------------------------------------------------- #
+# Joint solution (all four keypoints at once, paper Part II)
+# --------------------------------------------------------------------------- #
+# Default measurement weights for the joint solve. Only the RATIO sig_uv:sig_v
+# matters for the point estimate: it sets how much the fit trusts the keypoints
+# relative to the velocity direction. The absolute scale affects only the
+# covariance, which this point solver does not return. The caller (main.py)
+# normally derives sig_uv from the camera focal length.
+JOINT_SIGMA_UV = 1.0e-4            # keypoint noise, normalized image units
+JOINT_SIGMA_V = np.deg2rad(1.0)    # velocity-direction noise, radians
+
+
+def joint_solution(u1, v1, u2, v2, u3, v3, u4, v4, V, D,
+                   sig_uv=JOINT_SIGMA_UV, sig_v=JOINT_SIGMA_V):
+    """Recover all four keypoints jointly (paper Part II, "Joint solution").
+
+    Instead of solving the body and the wings separately, fit one parametric
+    aircraft model -- body length L1, wingspan L2, wing attachment point alpha
+    (0 = tail .. 1 = nose) and 6-DOF pose (R, t with ||t|| = D) -- so that its
+    projection matches the four measured normalized keypoints and its body axis
+    matches the velocity, in a single least-squares problem. This couples the
+    body and the wings (they share one pose), averages the keypoint and
+    velocity noise, and -- unlike the sequential wings solver -- does not
+    assume the wings are attached at the body midpoint.
+
+    Parameters mirror the sequential solvers: normalized coordinates of the
+    four keypoints (tail, nose, left tip, right tip), the body/velocity
+    direction V, and the range D to the body midpoint. ``sig_uv`` (normalized
+    image units) and ``sig_v`` (radians) weight the keypoint and velocity
+    residuals; only their ratio affects the result. The initial guess is the
+    closed-form sequential solution (body #2 + wings), refined by
+    Levenberg-Marquardt.
+
+    Returns
+    -------
+    P1, P2, P3, P4 : ndarray, shape (3,)
+    """
+    Vhat = _normalize(V)
+    uv = np.array([[u1, v1], [u2, v2], [u3, v3], [u4, v4]], dtype=float)
+
+    def local_points(L1, L2, alpha):
+        yw = (alpha - 0.5) * L1            # wing station along the body axis
+        return np.array([[0.0, -L1 / 2.0, 0.0], [0.0, L1 / 2.0, 0.0],
+                         [-L2 / 2.0, yw, 0.0], [L2 / 2.0, yw, 0.0]])
+
+    def pose(theta):
+        R = Rotation.from_rotvec(theta[:3]).as_matrix()
+        c = _ray(theta[3], theta[4])
+        t = D * c / np.linalg.norm(c)      # range is a hard constraint: |t| = D
+        return R, t
+
+    def points(theta):
+        R, t = pose(theta)
+        return local_points(theta[5] * D, theta[6] * D, theta[7]) @ R.T + t, R
+
+    def residuals(theta):
+        P, R = points(theta)
+        uvp = P[:, :2] / P[:, 2:3]
+        r_px = ((uvp - uv) / sig_uv).ravel()          # 8 reprojection residuals
+        r_v = np.cross(R[:, 1], Vhat) / sig_v          # body axis vs. velocity
+        return np.r_[r_px, r_v]
+
+    # Initial guess: the closed-form sequential solution (body #2 + wings).
+    P1, P2 = body_solution2(u1, v1, u2, v2, Vhat, D)
+    P3, P4 = wings_solution(u3, v3, u4, v4, Vhat, D)
+    x = _normalize(P4 - P3)
+    y = _normalize(P2 - P1)
+    z = np.cross(x, y)
+    U, _, Vt = np.linalg.svd(np.column_stack((x, y, z)))
+    R0 = U @ Vt                            # nearest rotation to [x y z]
+    b = uv[1] - uv[0]
+    wm = 0.5 * (uv[2] + uv[3])
+    alpha0 = float(np.clip((wm - uv[0]) @ b / (b @ b), 0.0, 1.0))
+    theta0 = np.r_[Rotation.from_matrix(R0).as_rotvec(),
+                   0.5 * (uv[0] + uv[1]),
+                   np.linalg.norm(P2 - P1) / D,
+                   np.linalg.norm(P4 - P3) / D,
+                   alpha0]
+
+    sol = least_squares(residuals, theta0, method="lm", x_scale="jac")
+    P, _ = points(sol.x)
+    return P[0], P[1], P[2], P[3]
 
 
 # --------------------------------------------------------------------------- #

@@ -89,6 +89,19 @@ def test_solve_head_tail_choice_changes_solution(viewer):
     p2 = viewer.point3d("P1_tail", "Computed")
     assert np.linalg.norm(p1 - p2) > 1e-6
 
+def test_joint_option_available_in_form(viewer):
+    from main import HEAD_TAIL_OPTIONS
+    assert "Joint with wings" in HEAD_TAIL_OPTIONS
+
+def test_solve_joint_with_wings_from_viewer(viewer):
+    viewer.algo_params = dict(viewer.algo_params, input_noisy=False,
+                              head_tail_solution="Joint with wings")
+    viewer._solve()
+    # noise-free joint fit recovers all four points at the GT keypoints
+    for el in ["P1_tail", "P2_nose", "P3_left_wing", "P4_right_wing"]:
+        gt = viewer.point3d(el, "GT")
+        assert np.linalg.norm(viewer.point3d(el, "Computed") - gt) < 0.01, el
+
 def test_solve_writes_params_and_results_blocks(viewer):
     viewer._solve()
     assert viewer.doc["Algorithm_parameters"] == viewer.algo_params

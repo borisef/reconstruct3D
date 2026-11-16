@@ -769,7 +769,7 @@ class AircraftViewer:
             ttk.Label(frm, text="Head/Tail solution:") \
                 .grid(row=1, column=0, sticky="w")
             ttk.Combobox(frm, textvariable=head_tail, state="readonly",
-                         values=algo.HEAD_TAIL_OPTIONS, width=9) \
+                         values=algo.HEAD_TAIL_OPTIONS, width=16) \
                 .grid(row=1, column=1, sticky="w", padx=(8, 0))
             result = {}
 

@@ -20,9 +20,15 @@ and persisted in the document):
 
     input_noisy        : True -> solve from Noisy_GT (2D + velocity + range),
                          False -> solve from GT.
-    head_tail_solution : "#1" | "#2" | "Average" -- the body (head/tail)
-                         problem has a two-fold ambiguity; this picks which
-                         solution is reported (Average = midpoint of both).
+    head_tail_solution : "#1" | "#2" | "Average" | "Joint with wings".
+                         The body (head/tail) problem has a two-fold
+                         ambiguity; "#1"/"#2" pick which closed-form solution
+                         is reported and "Average" is the midpoint of both
+                         (wings always from the separate wings solver).
+                         "Joint with wings" instead fits all four keypoints in
+                         one least-squares problem (paper Part II): body and
+                         wings share one pose and the wing attachment point is
+                         estimated rather than assumed at the body midpoint.
 
 Everything else (Camera_parameters, GT values, the 2D GT/Noisy_GT pixels,
 velocity and range) is carried through unchanged. 3D keypoints carry no
@@ -45,11 +51,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_INPUT = os.path.join(HERE, "inputs", "aircraft_input.json")
 DEFAULT_OUTPUT = os.path.join(HERE, "outputs", "aircraft_output.json")
 
-HEAD_TAIL_OPTIONS = ["#1", "#2", "Average"]
+HEAD_TAIL_OPTIONS = ["#1", "#2", "Average", "Joint with wings"]
 DEFAULT_ALGO_PARAMS = {
     "input_noisy": True,          # solve from Noisy_GT (else GT)
-    "head_tail_solution": "#1",   # "#1" | "#2" | "Average"
+    "head_tail_solution": "#1",   # see HEAD_TAIL_OPTIONS
 }
+
+# Joint-solution measurement weights (head_tail_solution == "Joint with
+# wings"). Only the ratio matters for the estimate; sig_uv is derived from the
+# camera focal length so it is comparable to sig_v across cameras.
+JOINT_SIGMA_PX = 1.0       # assumed keypoint noise, pixels
+JOINT_SIGMA_V_DEG = 1.0    # assumed velocity-direction noise, degrees
 
 
 def algo_params(doc=None, override=None):
@@ -101,19 +113,26 @@ def solve_document(doc, params=None):
     V = np.array([Vd["V_x"], Vd["V_y"], Vd["V_z"]])
     D = doc["Range_meters"][source]
 
-    # Body: the head/tail ambiguity gives two solutions; report the chosen
-    # one. (Wing midpoint == body midpoint == aircraft centre, so the single
-    # body range D serves the wings too.)
-    P1_s1, P2_s1 = ru.body_solution1(u1, v1, u2, v2, V, D)
-    P1_s2, P2_s2 = ru.body_solution2(u1, v1, u2, v2, V, D)
     choice = p["head_tail_solution"]
-    if choice == "#1":
-        P1, P2 = P1_s1, P2_s1
-    elif choice == "#2":
-        P1, P2 = P1_s2, P2_s2
-    else:  # "Average"
-        P1, P2 = 0.5 * (P1_s1 + P1_s2), 0.5 * (P2_s1 + P2_s2)
-    P3, P4 = ru.wings_solution(u3, v3, u4, v4, V, D)
+    if choice == "Joint with wings":
+        # One least-squares fit of all four keypoints (paper Part II).
+        sig_uv = JOINT_SIGMA_PX / fx
+        sig_v = np.deg2rad(JOINT_SIGMA_V_DEG)
+        P1, P2, P3, P4 = ru.joint_solution(
+            u1, v1, u2, v2, u3, v3, u4, v4, V, D, sig_uv=sig_uv, sig_v=sig_v)
+    else:
+        # Body: the head/tail ambiguity gives two closed-form solutions;
+        # report the chosen one. (Wing midpoint == body midpoint == aircraft
+        # centre, so the single body range D serves the wings too.)
+        P1_s1, P2_s1 = ru.body_solution1(u1, v1, u2, v2, V, D)
+        P1_s2, P2_s2 = ru.body_solution2(u1, v1, u2, v2, V, D)
+        if choice == "#1":
+            P1, P2 = P1_s1, P2_s1
+        elif choice == "#2":
+            P1, P2 = P1_s2, P2_s2
+        else:  # "Average"
+            P1, P2 = 0.5 * (P1_s1 + P1_s2), 0.5 * (P2_s1 + P2_s2)
+        P3, P4 = ru.wings_solution(u3, v3, u4, v4, V, D)
 
     c3d = doc["Coordinates_3D"]
     c3d["P1_tail"]["Computed"] = aio.vec3(P1)

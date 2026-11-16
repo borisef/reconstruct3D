@@ -601,3 +601,23 @@ matplotlib's quit keymap (ctrl+w still quits).
 - Tests: solver-side reprojection-equality checks in `test_solve.py`,
   viewer-side enablement/rendering checks in `test_viewer_algo_params.py`.
   Suite: 272 passing.
+
+### "Joint with wings" head/tail option (joint single-shot solver)
+- Added `reconstruction_utils.joint_solution`: the paper's Part II joint
+  least-squares fit (body length, wingspan, wing attachment point alpha and
+  6-DOF pose with |t|=D) of all four keypoints at once, initialised from the
+  sequential solution and refined with Levenberg-Marquardt (scipy). Unlike the
+  sequential path it couples body and wings through one shared pose and
+  estimates where the wings meet the body instead of assuming the midpoint.
+- `head_tail_solution` gained a fourth value, "Joint with wings"; when chosen,
+  `main.solve_document` fills all of P1..P4 from the joint fit (keypoint vs.
+  velocity weighting from `JOINT_SIGMA_PX` / `JOINT_SIGMA_V_DEG`, sig_uv
+  derived from the camera focal length). The GUI's Set Algo Params dropdown
+  picks it up automatically (combobox widened for the longer label); CLI:
+  `--head-tail "Joint with wings"`.
+- Noise-free GT solve recovers all four points to machine precision, including
+  non-midpoint wing attachment (alpha != 0.5), which the sequential wings
+  solver cannot.
+- Tests: new `unitests/test_joint_solution.py` (exactness across poses and
+  alpha, structural properties, weighting/robustness) plus joint-option cases
+  in `test_solve.py` and `test_viewer_algo_params.py`. Suite: 288 passing.
