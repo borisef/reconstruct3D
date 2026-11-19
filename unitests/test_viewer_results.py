@@ -143,6 +143,17 @@ def test_table_dashes_without_computed(viewer):
     assert "0.500" in txt       # GT cross point
     assert "-" in txt
 
+def test_table_mean_error_dash_before_solve(viewer):
+    line = [l for l in viewer._results_table_text().splitlines()
+            if l.startswith("MeanErr")]
+    assert len(line) == 1 and line[0].rstrip().endswith("-")
+
+def test_table_mean_error_number_after_solve(solved_viewer):
+    line = [l for l in solved_viewer._results_table_text().splitlines()
+            if l.startswith("MeanErr")][0]
+    val = float(line.split()[-1])   # parses as a number
+    assert val > 0.0                # Noisy_GT solve has a non-zero 3D error
+
 def test_table_calc_values_close_to_gt_after_gt_solve(viewer):
     solve_document(viewer.doc, params={"input_noisy": False})
     s1 = viewer._aircraft_stats("Computed")

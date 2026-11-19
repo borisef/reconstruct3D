@@ -1,9 +1,17 @@
 """
 main.py
 
-Example driver for the JSON-based aircraft 3D-2D reconstruction.
+Solver / algorithm library for the JSON-based aircraft 3D-2D reconstruction,
+plus a small command-line solve driver. This module holds the core reconstruction
+API (``solve_document``, ``algo_params``, ``aircraft_stats``, ``results_block``,
+``HEAD_TAIL_OPTIONS`` ...) and is imported as ``algo`` by the GUI and the
+comparison tool. The project's entry points are:
 
-Usage:
+    main.py                     -- this file: solve one JSON from the CLI (below)
+    main_GUI.py                 -- launch the interactive matplotlib viewer
+    main_compare_algorithms.py  -- run the Monte-Carlo algorithm comparison
+
+Usage (solve CLI):
     python main.py [INPUT_JSON] [OUTPUT_JSON] [--gt] [--head-tail CHOICE]
 
 Reads an input document (see aircraft_io.py for the schema), solves for the 3D
@@ -52,9 +60,14 @@ DEFAULT_INPUT = os.path.join(HERE, "inputs", "aircraft_input.json")
 DEFAULT_OUTPUT = os.path.join(HERE, "outputs", "aircraft_output.json")
 
 HEAD_TAIL_OPTIONS = ["#1", "#2", "Average", "Joint with wings"]
+# Which velocity vector feeds the solvers. "corrected_by_2D_vel_vec" replaces
+# the noisy velocity's image-plane azimuth with the clean 2D tail->nose
+# direction (keeping its depth tilt); see ru.correct_velocity_with_2d.
+VELOCITY_OPTIONS = ["vel_vec", "corrected_by_2D_vel_vec"]
 DEFAULT_ALGO_PARAMS = {
-    "input_noisy": True,          # solve from Noisy_GT (else GT)
-    "head_tail_solution": "#1",   # see HEAD_TAIL_OPTIONS
+    "input_noisy": True,              # solve from Noisy_GT (else GT)
+    "head_tail_solution": "#1",       # see HEAD_TAIL_OPTIONS
+    "velocity_source": "vel_vec",     # see VELOCITY_OPTIONS
 }
 
 # Joint-solution measurement weights (head_tail_solution == "Joint with
@@ -76,6 +89,9 @@ def algo_params(doc=None, override=None):
     if p["head_tail_solution"] not in HEAD_TAIL_OPTIONS:
         raise ValueError(f"head_tail_solution must be one of "
                          f"{HEAD_TAIL_OPTIONS}, got {p['head_tail_solution']!r}")
+    if p["velocity_source"] not in VELOCITY_OPTIONS:
+        raise ValueError(f"velocity_source must be one of "
+                         f"{VELOCITY_OPTIONS}, got {p['velocity_source']!r}")
     p["input_noisy"] = bool(p["input_noisy"])
     return p
 
@@ -87,6 +103,28 @@ def _normalized_2d(doc, name, source, fx, fy, cx, cy):
         raise ValueError(f"Coordinates_2D.{name}.{source} is null; "
                          f"cannot solve from variant '{source}'.")
     return aio.pixel_to_normalized([px["u"], px["v"]], fx, fy, cx, cy)
+
+
+def corrected_velocity(doc, source):
+    """The 2D-corrected velocity for ``source`` (ndarray shape (3,)), or None.
+
+    Replaces the source velocity's image-plane azimuth with the clean 2D
+    tail->nose direction, keeping the depth tilt (see
+    ``ru.correct_velocity_with_2d``). Returns None when the source velocity or
+    the tail/nose 2D pixels are missing -- so callers (the GUI) can show it live
+    without a solve. This is the single definition ``solve_document`` also uses
+    for the Computed velocity slot.
+    """
+    Vd = doc["Velocity_vector_3D"].get(source)
+    p1 = doc["Coordinates_2D"]["p1_tail"].get(source)
+    p2 = doc["Coordinates_2D"]["p2_nose"].get(source)
+    if Vd is None or p1 is None or p2 is None:
+        return None
+    fx, fy, cx, cy = aio.camera_intrinsics(doc["Camera_parameters"])
+    (u1, v1) = aio.pixel_to_normalized([p1["u"], p1["v"]], fx, fy, cx, cy)
+    (u2, v2) = aio.pixel_to_normalized([p2["u"], p2["v"]], fx, fy, cx, cy)
+    V = np.array([Vd["V_x"], Vd["V_y"], Vd["V_z"]])
+    return ru.correct_velocity_with_2d(V, u2 - u1, v2 - v1)
 
 
 def solve_document(doc, params=None):
@@ -112,6 +150,14 @@ def solve_document(doc, params=None):
     Vd = doc["Velocity_vector_3D"][source]
     V = np.array([Vd["V_x"], Vd["V_y"], Vd["V_z"]])
     D = doc["Range_meters"][source]
+
+    # Velocity corrected by the clean 2D tail->nose azimuth (keeps the noisy
+    # velocity's depth tilt). Always stored in the Computed velocity slot so the
+    # viewer can overlay it; the solvers consume it only when selected.
+    V_corr = corrected_velocity(doc, source)
+    doc["Velocity_vector_3D"]["Computed"] = aio.vel(V_corr)
+    if p["velocity_source"] == "corrected_by_2D_vel_vec":
+        V = V_corr
 
     choice = p["head_tail_solution"]
     if choice == "Joint with wings":
@@ -210,6 +256,26 @@ def reprojection_errors_px(doc, source):
     return errs
 
 
+def keypoint_errors_3d(doc):
+    """{P1_tail: |GT-Computed|, ..., "mean": m} in metres, or None without data.
+
+    Euclidean distance between each GT and Computed 3D keypoint -- the mean is
+    the single reconstruction-error number shown in the GUI's "3D results" view.
+    """
+    c3d = doc["Coordinates_3D"]
+    errs = {}
+    for el3d in aio.KEYPOINTS_3D:
+        gt = _xyz(c3d[el3d].get("GT"))
+        est = _xyz(c3d[el3d].get("Computed"))
+        if gt is None or est is None:
+            continue
+        errs[el3d] = float(np.linalg.norm(gt - est))
+    if not errs:
+        return None
+    errs["mean"] = float(np.mean(list(errs.values())))
+    return errs
+
+
 def _stats_json(s):
     """JSON-ready form of ``aircraft_stats`` (the 3D-results table row)."""
     if s is None:
@@ -227,9 +293,12 @@ def _stats_json(s):
 
 def results_block(doc, source):
     """The Results block: the 2D- and 3D-results-view tables as JSON."""
+    err3d = keypoint_errors_3d(doc)
     return {
         "source": source,
         "errors_2D_px": reprojection_errors_px(doc, source),
+        "errors_3D_m": err3d,
+        "mean_error_3D_m": None if err3d is None else err3d["mean"],
         "table_3D": {v: _stats_json(aircraft_stats(doc, v))
                      for v in ("GT", "Computed")},
     }

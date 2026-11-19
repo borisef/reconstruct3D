@@ -3,6 +3,151 @@
 Implementation of the paper **"3D-2D analysis of aircraft"** (single-image 3D
 reconstruction of an aircraft modeled as a 4-keypoint cross).
 
+## 2026-11-18
+
+### GUI: live corrected velocity, velocity arrows everywhere, mean 3D error
+- The `Computed` velocity slot now holds the **live** 2D-corrected velocity:
+  the viewer recomputes it every render from the parameter-selected source
+  (Noisy_GT / GT), so noise presses and GT edits update it immediately without
+  pressing Solve. A full Solve still writes the same value, so the slot stays
+  consistent with the solution. Extracted `main.corrected_velocity(doc, source)`
+  as the single definition `solve_document` and the GUI both call;
+  `AircraftViewer._refresh_corrected_velocity()` runs it at init, on load and at
+  the top of `render()`.
+- **2D view** now draws a velocity arrow for every checked variant
+  (GT / Noisy_GT / Computed). Noisy_GT carries no 3D keypoints, so its arrow
+  (and the Computed one) anchor on the GT body midpoint via the new
+  `_velocity_anchor_3d`; previously only GT rendered.
+- **3D results view** draws the velocity arrows too (checked variants, 0.8
+  body-lengths long from the body midpoint) and the results table gains a single
+  `MeanErr (m)` number — the mean `|GT - Computed|` over the four 3D keypoints,
+  from the new `main.keypoint_errors_3d(doc)` (also surfaced in the saved
+  `Results` block as `errors_3D_m` / `mean_error_3D_m`). Shows `-` before a solve.
+- Velocity-arrow visibility stays controlled by the existing `Vel` cells in the
+  visibility grid.
+- Tests: `corrected_velocity` / `keypoint_errors_3d` in `test_solve.py`; the
+  `MeanErr` line and live-velocity/anchor behaviour in `test_viewer_results.py`
+  and `test_viewer_noise.py`; the `Results`-schema and 2D-noise coupling
+  assertions in `test_viewer_algo_params.py` / `test_viewer_noise.py` updated for
+  the new keys and the live corrected velocity.
+
+### `corrected_by_2D_vel_vec`: fix a noisy velocity with the clean 2D body axis
+- New algorithm parameter `velocity_source` (`vel_vec` default /
+  `corrected_by_2D_vel_vec`) in `main.DEFAULT_ALGO_PARAMS`, listed in
+  `main.VELOCITY_OPTIONS` and validated in `algo_params`. It composes with every
+  head/tail solution (preprocessing step, not a separate algorithm).
+- `reconstruction_utils.correct_velocity_with_2d(V, du, dv)` replaces the noisy
+  velocity's image-plane azimuth with the labelled tail->nose direction
+  `(u2-u1, v2-v1)` while keeping its depth (Vz) tilt and magnitude; returns `V`
+  unchanged near nose-on (either the in-plane speed or the 2D step vanishing).
+- `main.solve_document` computes the corrected vector after reading the velocity,
+  always stores it in the `Computed` velocity slot (for visualization), and
+  feeds it to the solvers only when `corrected_by_2D_vel_vec` is selected.
+- GUI: "Set Algo Params" gains a "Velocity" dropdown (persisted with the other
+  params); the corrected velocity is drawn in the same green but **dotted** (as
+  the `Computed` velocity variant) in the 2D view and both pinhole-scheme views.
+- Plan `docs/plan_corrected_velocity.md` marked implemented; benchmark condition
+  in `main_compare_algorithms.py` left as follow-up.
+- Tests: `test_reconstruction_utils.py` (magnitude/depth kept, oriented 2D
+  direction, degenerate fallbacks), `test_solve.py` (default/validation,
+  Computed velocity filled, corrected changes the solution under noise, GT solve
+  stays accurate), `test_viewer_algo_params.py` (velocity_source persisted).
+
+### Entry-point refactor: `main_GUI.py` / `main_compare_algorithms.py`
+- Split the project's entry points by purpose so each `main_*` launches one
+  task:
+  - `main.py` — kept as the solver/algorithm library (imported as `algo` by the
+    GUI and the comparison) plus its solve-one-JSON CLI; docstring updated to
+    point at the two launchers.
+  - `main_GUI.py` (new) — launches the interactive matplotlib viewer
+    (`python main_GUI.py [PATH]`), equivalent to the old `python GUI/viewer.py`;
+    a thin launcher that delegates to `GUI/viewer.py`'s `main()`.
+  - `main_compare_algorithms.py` — the Monte-Carlo comparison, renamed from
+    `compare_algorithms.py` (unchanged behaviour: the per-setting mean/std error
+    table + histograms).
+- Test renamed to `unitests/test_main_compare_algorithms.py` and its import
+  updated; `docs/plan_corrected_velocity.md` reference updated. Suite: 302
+  passing.
+
+### `compare_algorithms.py` — per-setting mean/std error table
+- Refocused the benchmark on a single per-sample error
+  `Err = mean_i ‖GT_i − Computed_i‖` over the four 3D keypoints, reported as
+  **mean ± population std** (np.std, ddof=0) per algorithm.
+- Sweep is now a full grid: `alpha ∈ {0.3, 0.5, 0.8}` × `2D ∈ {0,5,10,20} px` ×
+  `velocity ∈ {0,2,5,10} deg` = **48 settings**, default **100 samples** each.
+- Simplified `run()` to return `{(alpha, px, vel): {algo: [Err per sample]}}`;
+  dropped the six-metric / body-wing-edge machinery (`metrics_3d`,
+  `edge_errors`, `METRICS`, `_frame`) in favour of `sample_error(doc)`.
+- Outputs reduced to two: `outputs/algorithm_comparison.csv` — **one row per
+  setting** with columns `alpha, sigma_px, sigma_vdeg, n_samples,
+  mean_err_{1,2,joint}_m, std_err_{1,2,joint}_m` (48 rows) — and
+  `outputs/algorithm_comparison_hist.png`, now the `Err` distribution per
+  algorithm (rows = alpha) at one representative noise cell (default 10 px /
+  5 deg). The stale `algorithm_comparison_summary.csv` was removed.
+- Findings: noise-free, sequential Err is a systematic ~1.95 m (α=0.3) / ~2.84 m
+  (α=0.8) from the off-midpoint wings while Joint is ~0; Joint leads across most
+  of the grid. At the extreme velocity noise (10°) the means carry large stds
+  from rare catastrophic solves — the histogram medians are robust to those.
+- Tests rewritten for the new return shape / helpers (`_mean_std` population
+  std, error-table columns incl. `mean_err_joint_m`, 48-row count, histogram
+  PNG). Suite: 302 passing.
+
+### `compare_algorithms.py` — alpha sweep + per-edge histograms (superseded)
+- Narrowed the analysis to the three requested algorithms (`#1`, `#2`,
+  `Joint with wings`; dropped `Average`, which tracked `#1`/`#2`).
+- Added a **wing-attachment (alpha) sweep** to the Monte Carlo (default
+  α ∈ {0.5, 0.65, 0.8}): `random_aircraft(rng, cam, alpha)` shifts the wing
+  pair along the body, so for α ≠ 0.5 the wing midpoint is off the body centre
+  — the regime where the sequential wings solver's midpoint assumption breaks.
+- Per-keypoint 3D Euclidean error is now collected split into **body edges**
+  (tail, nose) and **wing edges** (tips).
+- Three outputs (in `outputs/`): `algorithm_comparison.csv` (detailed per
+  (alpha, noise, algorithm) medians of the six metrics, now with an `alpha`
+  column), `algorithm_comparison_summary.csv` (short body/wing edge **mean +
+  median**), and `algorithm_comparison_hist.png` — a single image with a grid
+  of histograms (rows = alpha, columns = body/wing edges), the three algorithms
+  overlaid with median lines.
+- CLI: `python compare_algorithms.py [--trials N] [--seed S]
+  [--hist-noise PX DEG] [--outdir DIR]`.
+- Noise sweep spans 2D keypoint noise 0..10 px and velocity-direction noise
+  0..5 deg (isolated-axis sweeps plus combined mid/max); histograms default to
+  the mid level 5 px / 2.5 deg.
+- Findings (150-trial run): at α = 0.5 the three are comparable, but as the
+  wings move off-centre the sequential wing-edge error grows to a systematic
+  ~2.8 m (α = 0.65) and ~5.6 m (α = 0.8) regardless of noise, while
+  **Joint with wings** stays well under ~0.6 m — it estimates the attachment
+  point instead of assuming the midpoint. Body-edge errors stay similar across
+  all three.
+- Tests updated for the new API (alpha argument, edge collection, summary CSV,
+  histogram PNG, joint-wins-on-offset-wings). Suite: 301 passing.
+
+### `compare_algorithms.py` (new) — Monte-Carlo accuracy comparison
+- Benchmarks the four `head_tail_solution` algorithms (`#1`, `#2`, `Average`,
+  `Joint with wings`) against ground truth. Each trial samples a random
+  aircraft pose (uniform orientation, random in-frame image position, view
+  angle kept inside 20-70° to avoid nose-on/broadside degeneracy), projects the
+  four keypoints, derives the GT velocity and range, adds Gaussian noise to the
+  2D keypoints and the velocity direction at a chosen level (range left exact),
+  then solves the SAME noisy document with all four algorithms via
+  `main.solve_document`. Running them on identical noisy data per trial makes
+  the comparison paired.
+- 3D error metrics vs GT, aggregated as the median over trials: mean keypoint
+  position error, body-centre error, body-length error, wingspan error,
+  geodesic rotation error, and worst wingtip error. Reported per noise level as
+  a table (best algorithm per column marked `*`) with a best-per-column tally,
+  and written to `outputs/algorithm_comparison.csv`.
+- CLI: `python compare_algorithms.py [--trials N] [--seed S] [--csv PATH]`
+  (default 300 trials over a 9-point 2D×velocity noise sweep).
+- Findings (150-trial run): the three sequential variants are nearly identical
+  (they differ only in the body head/tail pick and share the wings solver);
+  **Joint with wings** clearly wins under velocity-direction noise and combined
+  noise — notably better rotation, wingspan and wingtip error — while under
+  pure 2D-keypoint noise the sequential solvers are marginally better on a few
+  metrics. This matches the paper's Part II / Section 13.3 results.
+- Tests: `unitests/test_compare_algorithms.py` (structure, noise-free accuracy,
+  joint-beats-sequential-rotation under velocity noise, sequential variants
+  close, CSV output). Suite: 299 passing.
+
 ## 2026-11-04
 
 ### Environment
@@ -621,3 +766,35 @@ matplotlib's quit keymap (ctrl+w still quits).
 - Tests: new `unitests/test_joint_solution.py` (exactness across poses and
   alpha, structural properties, weighting/robustness) plus joint-option cases
   in `test_solve.py` and `test_viewer_algo_params.py`. Suite: 288 passing.
+
+### Set Algo Params remembers the last choice across runs
+- The algorithm parameters chosen in the Set Algo Params form are now
+  persisted to a small prefs file (`$XDG_CONFIG_HOME/reconstruct3d/
+  algo_params.json`, or `~/.config/...`; override with the
+  `RECONSTRUCT3D_PREFS` env var) and restored on the next launch, so the form
+  opens on the values you last used instead of the built-in defaults.
+- Startup priority is: built-in defaults < the loaded document's own
+  `Algorithm_parameters` block < the remembered preference. The remembered
+  Set-Algo-Params choice wins so it genuinely sticks across runs (otherwise the
+  output JSON loaded on startup, which always carries a block, would shadow
+  it). When no preference has been set yet, a document's embedded params still
+  apply. Corrupt/unreadable prefs fall back to the defaults.
+- `AircraftViewer(path, prefs_path=...)` gained an optional prefs path (used by
+  the tests for isolation); conftest points `RECONSTRUCT3D_PREFS` at a throwaway
+  temp file so the suite never touches the real user config.
+- Tests: persistence round-trip, form pre-fill, doc-block-overrides-pref, and
+  corrupt-prefs fallback in `test_viewer_algo_params.py`. Suite: 292 passing.
+
+### Fix: Set Algo Params dialog now opens on the last choice
+- Root cause: the viewer runs on matplotlib's Tk root, but the params form
+  created a *second* `tk.Tk()` each time. Two live Tk interpreters make the
+  widgets ignore their initial values, so the dialog always opened on the
+  defaults regardless of the stored/remembered parameters.
+- The form now opens as a `Toplevel` over the existing root (falling back to
+  its own `tk.Tk()` only when there is no root), sets the checkbox and dropdown
+  values explicitly from `self.algo_params`, and is made modal with
+  `wait_window()`/`grab_set()` instead of a nested `mainloop()`. It therefore
+  pre-fills with the current parameters both within a session and across runs
+  (combined with the remembered-preference load order).
+- Not exercised by the headless suite (Tk needs a display); the 293 existing
+  tests still pass.

@@ -142,3 +142,28 @@ def test_compute_6dof_Y_column_is_body_direction():
     R = ru.compute_6dof(g["P1"], g["P2"], g["P3"], g["P4"])["R"]
     expected = g["V"]  # body_dir == velocity unit vector
     assert np.allclose(np.abs(R[:, 1]), np.abs(expected), atol=1e-8)
+
+
+# ── 2D-corrected velocity ──────────────────────────────────────────────────────
+
+def test_correct_velocity_keeps_magnitude_and_depth():
+    V = np.array([3.0, 4.0, 10.0])
+    out = ru.correct_velocity_with_2d(V, du=0.0, dv=0.02)
+    # magnitude preserved; depth (Vz) untouched; in-plane azimuth from 2D (+v)
+    assert np.linalg.norm(out) == pytest.approx(np.linalg.norm(V))
+    assert out[2] == pytest.approx(10.0)
+    assert out[0] == pytest.approx(0.0, abs=1e-12)
+    assert out[1] > 0
+
+def test_correct_velocity_uses_oriented_2d_direction():
+    V = np.array([3.0, 4.0, 10.0])
+    fwd = ru.correct_velocity_with_2d(V, du=0.02, dv=0.0)
+    bwd = ru.correct_velocity_with_2d(V, du=-0.02, dv=0.0)
+    # sign of the 2D step flips the in-plane direction (no 180 ambiguity)
+    assert fwd[0] > 0 and bwd[0] < 0
+
+def test_correct_velocity_degenerate_returns_input():
+    V = np.array([3.0, 4.0, 10.0])
+    assert np.allclose(ru.correct_velocity_with_2d(V, 0.0, 0.0), V)   # no 2D step
+    Vz = np.array([0.0, 0.0, 5.0])                                    # nose-on
+    assert np.allclose(ru.correct_velocity_with_2d(Vz, 0.01, 0.0), Vz)

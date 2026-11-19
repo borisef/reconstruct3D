@@ -22,6 +22,28 @@ def viewer():
     plt.close(v.fig)
 
 
+# ── live corrected velocity + velocity-arrow anchoring ───────────────────────
+
+def test_computed_velocity_populated_live_without_solve(viewer):
+    # The viewer keeps the Computed velocity = the 2D-corrected velocity, so it
+    # is available before any Solve (feature: corrected velocity shown live).
+    assert viewer.velocity("Computed") is not None
+
+def test_noisy_velocity_anchors_on_gt_midpoint(viewer):
+    # Noisy_GT has no 3D keypoints, so its 2D velocity arrow hangs on the GT
+    # body midpoint instead of being silently skipped.
+    P1, P2 = viewer.point3d("P1_tail", "GT"), viewer.point3d("P2_nose", "GT")
+    assert viewer._velocity_anchor_3d("Noisy_GT") is not None
+    assert np.allclose(viewer._velocity_anchor_3d("Noisy_GT"), 0.5 * (P1 + P2))
+
+def test_corrected_velocity_follows_2d_noise(viewer):
+    # A 2D noise press re-derives the Computed (corrected) velocity live.
+    viewer._on_noise_target("2D")
+    before = viewer.velocity("Computed").copy()
+    viewer._on_noise(up=True)
+    assert not np.allclose(before, viewer.velocity("Computed"))
+
+
 # ── 2D noise sigma ladder ─────────────────────────────────────────────────────
 
 def test_2d_sigma_starts_at_default(viewer):
@@ -66,13 +88,20 @@ def test_2d_noise_up_modifies_coordinates_2d(viewer):
     after = viewer.doc["Coordinates_2D"]
     assert before != after
 
-def test_2d_noise_only_modifies_coordinates_2d(viewer):
+def test_2d_noise_modifies_coordinates_2d_and_corrected_velocity(viewer):
+    # A 2D noise press re-samples the Noisy_GT pixels and, because the viewer
+    # keeps the Computed velocity = the live 2D-corrected velocity, refreshes
+    # that derived slot too. The measured velocity (GT / Noisy_GT) is untouched.
     viewer._on_noise_target("2D")
     before = json.loads(json.dumps(viewer.doc))
     viewer._on_noise(up=True)
     after = json.loads(json.dumps(viewer.doc))
-    changed = [k for k in before if before[k] != after[k]]
-    assert changed == ["Coordinates_2D"]
+    changed = {k for k in before if before[k] != after[k]}
+    assert changed == {"Coordinates_2D", "Velocity_vector_3D"}
+    vel_before, vel_after = before["Velocity_vector_3D"], after["Velocity_vector_3D"]
+    assert vel_before["GT"] == vel_after["GT"]
+    assert vel_before["Noisy_GT"] == vel_after["Noisy_GT"]
+    assert vel_before["Computed"] != vel_after["Computed"]
 
 # ── Velocity noise ────────────────────────────────────────────────────────────
 

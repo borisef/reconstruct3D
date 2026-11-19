@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 import aircraft_io as aio
-from main import (solve_document, algo_params, DEFAULT_ALGO_PARAMS,
-                  HEAD_TAIL_OPTIONS)
+from main import (solve_document, algo_params, corrected_velocity,
+                  keypoint_errors_3d, DEFAULT_ALGO_PARAMS,
+                  HEAD_TAIL_OPTIONS, VELOCITY_OPTIONS)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INPUT = os.path.join(ROOT, "inputs", "aircraft_input.json")
@@ -35,8 +36,14 @@ def _err(doc, name):
 
 def test_default_params():
     assert DEFAULT_ALGO_PARAMS == {"input_noisy": True,
-                                   "head_tail_solution": "#1"}
+                                   "head_tail_solution": "#1",
+                                   "velocity_source": "vel_vec"}
     assert HEAD_TAIL_OPTIONS == ["#1", "#2", "Average", "Joint with wings"]
+    assert VELOCITY_OPTIONS == ["vel_vec", "corrected_by_2D_vel_vec"]
+
+def test_algo_params_rejects_bad_velocity_source():
+    with pytest.raises(ValueError):
+        algo_params(override={"velocity_source": "nope"})
 
 def test_algo_params_doc_block_wins_over_defaults():
     doc = {"Algorithm_parameters": {"input_noisy": False}}
@@ -219,7 +226,8 @@ def test_output_algorithm_parameters_block():
     solve_document(doc, params={"input_noisy": False,
                                 "head_tail_solution": "Average"})
     assert doc["Algorithm_parameters"] == {"input_noisy": False,
-                                           "head_tail_solution": "Average"}
+                                           "head_tail_solution": "Average",
+                                           "velocity_source": "vel_vec"}
 
 def test_doc_params_reused_on_next_solve():
     # A saved document carries its parameters; re-solving honours them.
@@ -256,3 +264,69 @@ def test_results_json_serializable():
     doc = _doc()
     solve_document(doc)
     json.dumps(doc)   # must not raise (no numpy types)
+
+# ── velocity source: 2D-corrected velocity ────────────────────────────────────
+
+def _vel(doc, variant):
+    e = doc["Velocity_vector_3D"][variant]
+    return None if e is None else np.array([e["V_x"], e["V_y"], e["V_z"]])
+
+def test_computed_velocity_always_filled_and_vel_vec_default_untouched():
+    # The corrected velocity is stored in the Computed slot regardless, while
+    # the default (vel_vec) still solves from the raw velocity.
+    doc = _doc()
+    solve_document(doc)   # default velocity_source == "vel_vec"
+    assert doc["Algorithm_parameters"]["velocity_source"] == "vel_vec"
+    assert _vel(doc, "Computed") is not None
+    # same magnitude as the noisy velocity it was derived from
+    assert np.linalg.norm(_vel(doc, "Computed")) == pytest.approx(
+        np.linalg.norm(_vel(doc, "Noisy_GT")), rel=1e-9)
+
+def test_corrected_velocity_changes_solution_under_noise():
+    d_raw, d_corr = _doc(), _doc()
+    solve_document(d_raw, params={"velocity_source": "vel_vec"})
+    solve_document(d_corr, params={"velocity_source": "corrected_by_2D_vel_vec"})
+    p_raw = _xyz(d_raw["Coordinates_3D"]["P2_nose"]["Computed"])
+    p_corr = _xyz(d_corr["Coordinates_3D"]["P2_nose"]["Computed"])
+    assert np.linalg.norm(p_raw - p_corr) > 1e-6
+
+def test_corrected_velocity_gt_solve_still_accurate():
+    # With clean inputs the 2D azimuth nearly matches the velocity's in-plane
+    # azimuth (near-orthographic at long range), so the correction barely moves
+    # the solution: sub-metre error on a 30 m aircraft at ~2 km.
+    doc = _doc()
+    solve_document(doc, params={"input_noisy": False,
+                                "velocity_source": "corrected_by_2D_vel_vec"})
+    for name in aio.KEYPOINTS_3D:
+        assert _err(doc, name) < 0.5, name
+
+def test_corrected_velocity_matches_computed_slot():
+    # The standalone helper returns exactly the vector solve stores in the
+    # Computed velocity slot (single source of truth, source = Noisy_GT).
+    doc = _doc()
+    solve_document(doc)   # default input_noisy == True
+    assert np.allclose(corrected_velocity(doc, "Noisy_GT"), _vel(doc, "Computed"))
+
+def test_corrected_velocity_none_without_source_data():
+    doc = _doc()
+    doc["Velocity_vector_3D"]["Noisy_GT"] = None
+    assert corrected_velocity(doc, "Noisy_GT") is None
+
+# ── 3D keypoint errors (mean reconstruction error) ───────────────────────────
+
+def test_keypoint_errors_3d_none_before_solve():
+    assert keypoint_errors_3d(_doc()) is None
+
+def test_keypoint_errors_3d_zero_on_noise_free_gt_solve():
+    doc = _doc()
+    solve_document(doc, params=GT_PARAMS)   # exact recovery from clean GT
+    err = keypoint_errors_3d(doc)
+    assert set(err) == set(aio.KEYPOINTS_3D) | {"mean"}
+    assert err["mean"] == pytest.approx(0.0, abs=1e-6)
+    for name in aio.KEYPOINTS_3D:
+        assert err[name] == pytest.approx(_err(doc, name), abs=1e-12)
+
+def test_keypoint_errors_3d_mean_grows_with_noise():
+    doc = _doc()
+    solve_document(doc)   # from Noisy_GT
+    assert keypoint_errors_3d(doc)["mean"] > 0.0

@@ -64,6 +64,7 @@ Run:
 """
 
 import copy
+import json
 import os
 import sys
 
@@ -410,8 +411,9 @@ class Dropdown:
 # Viewer
 # --------------------------------------------------------------------------- #
 class AircraftViewer:
-    def __init__(self, path=None):
+    def __init__(self, path=None, prefs_path=None):
         self.path = path or self._default_path()
+        self._prefs_path = prefs_path or self._default_prefs_path()
         self.doc = aio.load_json(self.path)
         self._ensure_gt_2d_consistent()
         self.view = "2D"
@@ -425,9 +427,12 @@ class AircraftViewer:
         self._rng = np.random.default_rng()
         self._last_solve_source = None  # last solve's input variant; it is the
                                         # error reference of the 2D-results view
-        # Algorithm parameters (Set Algo Params form); documents may carry
-        # their own Algorithm_parameters block, which wins over the defaults.
-        self.algo_params = algo.algo_params(self.doc)
+        # Algorithm parameters (Set Algo Params form). Priority: built-in
+        # defaults < the document's own Algorithm_parameters block < the
+        # remembered last choice (prefs file), so a Set-Algo-Params choice
+        # sticks across runs.
+        self.algo_params = self._startup_algo_params()
+        self._refresh_corrected_velocity()  # populate the live Computed velocity
         self._init_visibility()
 
         self.fig = None
@@ -443,6 +448,57 @@ class AircraftViewer:
         out = os.path.join(_ROOT, "outputs", "aircraft_output.json")
         return out if os.path.exists(out) else \
             os.path.join(_ROOT, "inputs", "aircraft_input.json")
+
+    # ----------------------------------------- algorithm-parameter prefs #
+    @staticmethod
+    def _default_prefs_path():
+        """Where the last Set-Algo-Params choice is remembered across runs.
+
+        Overridable with the RECONSTRUCT3D_PREFS environment variable (used by
+        the tests to stay out of the real user config).
+        """
+        env = os.environ.get("RECONSTRUCT3D_PREFS")
+        if env:
+            return env
+        base = os.environ.get("XDG_CONFIG_HOME") or \
+            os.path.join(os.path.expanduser("~"), ".config")
+        return os.path.join(base, "reconstruct3d", "algo_params.json")
+
+    def _load_prefs(self):
+        """Remembered algorithm parameters, or {} if none / unreadable."""
+        try:
+            with open(self._prefs_path) as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_prefs(self):
+        """Persist the current algorithm parameters as the remembered choice."""
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self._prefs_path)),
+                        exist_ok=True)
+            with open(self._prefs_path, "w") as fh:
+                json.dump(self.algo_params, fh, indent=2)
+        except Exception:  # pragma: no cover - best-effort persistence
+            pass
+
+    def _startup_algo_params(self):
+        """Effective parameters at load: defaults < doc block < remembered pref.
+
+        The remembered Set-Algo-Params choice wins so it genuinely sticks from
+        one run to the next (otherwise a loaded output file, which always
+        carries its own Algorithm_parameters block, would shadow it). When no
+        preference has been set, a document's embedded params still apply.
+        """
+        p = dict(algo.DEFAULT_ALGO_PARAMS)
+        for layer in (self.doc.get("Algorithm_parameters") or {},
+                      self._load_prefs()):
+            p.update({k: v for k, v in layer.items() if k in p})
+        try:
+            return algo.algo_params(override=p)   # validates values
+        except ValueError:                        # corrupt pref value
+            return dict(algo.DEFAULT_ALGO_PARAMS)
 
     # --------------------------------------------------------- visibility #
     def _init_visibility(self):
@@ -699,7 +755,8 @@ class AircraftViewer:
         self._ensure_gt_2d_consistent()
         self._undo_stack = []
         self._last_solve_source = None
-        self.algo_params = algo.algo_params(self.doc)
+        self.algo_params = self._startup_algo_params()
+        self._refresh_corrected_velocity()
         if self.view == "edit":    # re-anchor the edit scene to the new data
             self._edit_anchor = self._scheme_anchor()
         self._init_visibility()
@@ -731,7 +788,10 @@ class AircraftViewer:
 
     def _params_text(self):
         src = "Noisy" if self.algo_params["input_noisy"] else "GT"
-        return f"input {src}, head/tail {self.algo_params['head_tail_solution']}"
+        txt = f"input {src}, head/tail {self.algo_params['head_tail_solution']}"
+        if self.algo_params.get("velocity_source") == "corrected_by_2D_vel_vec":
+            txt += ", V=2D-corrected"
+        return txt
 
     def _on_set_params(self, _event):
         """Set Algo Params button: pop the form, keep the result in the doc."""
@@ -742,6 +802,8 @@ class AircraftViewer:
         # Persist with the document so Save JSON exports the parameters even
         # before a solve (a solve rewrites the block anyway).
         self.doc["Algorithm_parameters"] = dict(self.algo_params)
+        # Remember this choice for the next run.
+        self._save_prefs()
         self._status.set_text(self._status_text()
                               + f"  [params: {self._params_text()}]")
         self.fig.canvas.draw_idle()
@@ -749,44 +811,82 @@ class AircraftViewer:
     def _ask_algo_params(self):
         """Modal algorithm-parameters form; returns a params dict or None.
 
-        Current parameters: "Input Type: Noisy" checkbox and the "Head/Tail
-        solution" dropdown (#1 / #2 / Average). The form will grow with the
-        algorithm.
+        Current parameters: "Input Type: Noisy" checkbox, the "Head/Tail
+        solution" dropdown (#1 / #2 / Average / Joint with wings) and the
+        "Velocity" dropdown (vel_vec / corrected_by_2D_vel_vec). The form opens
+        pre-filled with the current parameters (``self.algo_params``), so it
+        always shows the last choice.
+
+        The viewer already owns matplotlib's Tk root, so this opens a Toplevel
+        over it rather than a second ``tk.Tk()`` -- two live Tk interpreters
+        make the widgets ignore their initial values, which is why the form
+        used to open on the defaults no matter what was stored.
         """
         try:
             import tkinter as tk
             from tkinter import ttk
-            root = tk.Tk()
-            root.title("Algorithm parameters")
-            root.resizable(False, False)
-            noisy = tk.BooleanVar(root, value=self.algo_params["input_noisy"])
-            head_tail = tk.StringVar(
-                root, value=self.algo_params["head_tail_solution"])
-            frm = ttk.Frame(root, padding=12)
-            frm.grid()
-            ttk.Checkbutton(frm, text="Input Type: Noisy", variable=noisy) \
-                .grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-            ttk.Label(frm, text="Head/Tail solution:") \
-                .grid(row=1, column=0, sticky="w")
-            ttk.Combobox(frm, textvariable=head_tail, state="readonly",
-                         values=algo.HEAD_TAIL_OPTIONS, width=16) \
-                .grid(row=1, column=1, sticky="w", padx=(8, 0))
-            result = {}
-
-            def _ok():
-                result["params"] = {"input_noisy": bool(noisy.get()),
-                                    "head_tail_solution": head_tail.get()}
-                root.destroy()
-
-            ttk.Button(frm, text="OK", command=_ok) \
-                .grid(row=2, column=0, pady=(12, 0))
-            ttk.Button(frm, text="Cancel", command=root.destroy) \
-                .grid(row=2, column=1, pady=(12, 0))
-            root.grab_set()
-            root.mainloop()
-            return result.get("params")
         except Exception:
             return None
+
+        parent = getattr(tk, "_default_root", None)
+        try:
+            win = tk.Toplevel(parent) if parent is not None else tk.Tk()
+        except Exception:
+            return None
+
+        cur = self.algo_params
+        win.title("Algorithm parameters")
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=12)
+        frm.grid()
+
+        noisy = tk.BooleanVar(win)
+        noisy.set(bool(cur["input_noisy"]))
+        ttk.Checkbutton(frm, text="Input Type: Noisy", variable=noisy) \
+            .grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        ttk.Label(frm, text="Head/Tail solution:") \
+            .grid(row=1, column=0, sticky="w")
+        combo = ttk.Combobox(frm, state="readonly",
+                             values=algo.HEAD_TAIL_OPTIONS, width=20)
+        combo.grid(row=1, column=1, sticky="w", padx=(8, 0))
+        combo.set(cur["head_tail_solution"])     # open on the last choice
+
+        ttk.Label(frm, text="Velocity:") \
+            .grid(row=2, column=0, sticky="w", pady=(8, 0))
+        vel = ttk.Combobox(frm, state="readonly",
+                           values=algo.VELOCITY_OPTIONS, width=20)
+        vel.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        vel.set(cur["velocity_source"])          # open on the last choice
+
+        result = {}
+
+        def _ok():
+            result["params"] = {"input_noisy": bool(noisy.get()),
+                                "head_tail_solution": combo.get(),
+                                "velocity_source": vel.get()}
+            win.destroy()
+
+        ttk.Button(frm, text="OK", command=_ok) \
+            .grid(row=3, column=0, pady=(12, 0))
+        ttk.Button(frm, text="Cancel", command=win.destroy) \
+            .grid(row=3, column=1, pady=(12, 0))
+
+        try:
+            if parent is not None:
+                win.transient(parent)
+            win.grab_set()
+            if parent is not None:
+                win.wait_window()        # modal over the running mainloop
+            else:
+                win.mainloop()           # we own the only root
+        except Exception:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            return None
+        return result.get("params")
 
     def _on_save(self, _event):
         path = self._ask_save()
@@ -896,7 +996,23 @@ class AircraftViewer:
             return None
 
     # ------------------------------------------------------------- render #
+    def _refresh_corrected_velocity(self):
+        """Keep the Computed velocity slot = the live 2D-corrected velocity.
+
+        The Computed velocity is the source velocity with its image-plane
+        azimuth replaced by the clean 2D tail->nose direction (see
+        algo.corrected_velocity). Recomputing it every render -- from the source
+        the algorithm parameters select (Noisy_GT or GT) -- means noise presses
+        and GT edits update it immediately, without pressing Solve. A full Solve
+        stores the same value, so this stays consistent with the solution.
+        """
+        source = "Noisy_GT" if self.algo_params.get("input_noisy") else "GT"
+        V_corr = algo.corrected_velocity(self.doc, source)
+        self.doc["Velocity_vector_3D"]["Computed"] = \
+            None if V_corr is None else aio.vel(V_corr)
+
     def render(self):
+        self._refresh_corrected_velocity()
         if self.view in ("3d", "edit", "results"):
             self.ax.set_visible(False)
             self.ax3d.set_visible(True)
@@ -1104,23 +1220,41 @@ class AircraftViewer:
         if self.show_legends:
             self._draw_legends()
 
+    def _velocity_anchor_3d(self, variant):
+        """Body midpoint to hang ``variant``'s velocity arrow on (3D, metres).
+
+        The variant's own 0.5*(P1+P2) when it has 3D keypoints (GT, Computed);
+        otherwise the GT midpoint. Noisy_GT carries no 3D keypoints -- only a
+        noisy velocity direction about the GT position -- so it anchors on GT.
+        Returns None when no variant provides a body.
+        """
+        for v in (variant, "GT"):
+            P1, P2 = self.point3d("P1_tail", v), self.point3d("P2_nose", v)
+            if P1 is not None and P2 is not None:
+                return 0.5 * (P1 + P2)
+        return None
+
     def _draw_velocity_arrow(self):
-        # One arrow per checked variant (non-GT fainter), anchored at that
-        # variant's body midpoint, so e.g. Velocity noise is visible.
+        # One arrow per checked variant (non-GT fainter), anchored at the body
+        # midpoint (GT's for Noisy_GT, which has no 3D keypoints) so every
+        # checked velocity -- including Noisy and the live corrected Computed --
+        # shows its 2D direction.
         for v in self._visible_velocity_variants():
-            P1, P2, Vel = (self.point3d("P1_tail", v),
-                           self.point3d("P2_nose", v), self.velocity(v))
-            if P1 is None or P2 is None:
+            Vel = self.velocity(v)
+            mid = self._velocity_anchor_3d(v)
+            if mid is None or Vel is None:
                 continue
             alpha = 1.0 if v == "GT" else 0.65
-            mid = 0.5 * (P1 + P2)
             tip = mid + Vel / np.linalg.norm(Vel) * 300.0   # 300 m along V
             fx, fy, cx, cy = aio.camera_intrinsics(self.doc["Camera_parameters"])
             a = aio.project_pixel(mid, fx, fy, cx, cy)
             b = aio.project_pixel(tip, fx, fy, cx, cy)
+            # Computed = the 2D-corrected velocity: same colour, dotted.
+            ls = ":" if v == "Computed" else "-"
             self.ax.annotate("", xy=tuple(b), xytext=tuple(a),
                              arrowprops=dict(arrowstyle="-|>", color=VEL_ARROW,
-                                             lw=2.0, alpha=alpha), zorder=2)
+                                             lw=2.0, alpha=alpha, linestyle=ls),
+                             zorder=2)
 
     # ------------------------------------------------- pinhole scheme (b) #
     def _scheme_ref_variant(self):
@@ -1442,9 +1576,11 @@ class AircraftViewer:
             alpha = 1.0 if v == "GT" else 0.65
             tip3 = Vel / np.linalg.norm(Vel) * SCHEME_VEL_LEN
             bq, tq = o, self._scr(tip3)
+            # Computed = the 2D-corrected velocity: dotted instead of dashed.
+            ls = ":" if v == "Computed" else "--"
             ax.annotate("", xy=tuple(tq), xytext=tuple(bq),
                         arrowprops=dict(arrowstyle="-|>", color=VEL_ARROW,
-                                        lw=2.0, linestyle="--", alpha=alpha),
+                                        lw=2.0, linestyle=ls, alpha=alpha),
                         zorder=4)
             ax.annotate(f"[Vx,Vy,Vz] {VARIANT_SHORT[v]}", tq,
                         textcoords="offset points",
@@ -1641,8 +1777,10 @@ class AircraftViewer:
             alpha = 1.0 if v == "GT" else 0.65
             tip = P3(Vel / np.linalg.norm(Vel) * SCHEME_VEL_LEN)
             d = tip - o
+            # Computed = the 2D-corrected velocity: dotted instead of dashed.
+            ls = ":" if v == "Computed" else "--"
             ax.quiver(o[0], o[1], o[2], d[0], d[1], d[2], color=VEL_ARROW,
-                      linewidth=2.0, arrow_length_ratio=0.15, linestyle="--",
+                      linewidth=2.0, arrow_length_ratio=0.15, linestyle=ls,
                       alpha=alpha)
             ax.text(tip[0], tip[1], tip[2],
                     f"  [Vx,Vy,Vz] {VARIANT_SHORT[v]}", fontsize=8,
@@ -1721,8 +1859,13 @@ class AircraftViewer:
             ("CrossPoint", [fmt_val(stats[l], "cross", 3)
                             for l, _ in self.RESULTS_TABLE_COLS]),
         ]
-        return "\n".join(name.ljust(11) + "".join(v.rjust(wid) for v in vals)
-                         for name, vals in rows)
+        table = "\n".join(name.ljust(11) + "".join(v.rjust(wid) for v in vals)
+                          for name, vals in rows)
+        # Single reconstruction-error number: mean |GT - Computed| over the 3D
+        # keypoints, in metres (or "-" before a solve).
+        err = algo.keypoint_errors_3d(self.doc)
+        mean = "-" if err is None else f"{err['mean']:.3f}"
+        return table + "\n" + "MeanErr (m)".ljust(11) + mean.rjust(wid)
 
     def _render_results_3d(self):
         ax = self.ax3d
@@ -1796,6 +1939,21 @@ class AircraftViewer:
                 a, b = gt_q[el], comp_q[el]
                 ax.plot([a[0], b[0]], [a[1], b[1]], [a[2], b[2]],
                         color="#777777", lw=0.8, linestyle=":")
+
+        # Velocity arrows (checked variants) from the body midpoint, drawn
+        # 0.8 body-lengths long so they stay near the aircraft. Noisy_GT (no 3D
+        # keypoints) hangs on the GT midpoint; see _velocity_anchor_3d.
+        vstats = self._aircraft_stats("GT") or self._aircraft_stats("Computed")
+        if vstats is not None:
+            vel_len = 0.8 * vstats["body_len"]
+            for v in self._visible_velocity_variants():
+                Vel = self.velocity(v)
+                anchor = self._velocity_anchor_3d(v)
+                if Vel is None or anchor is None:
+                    continue
+                tip = anchor + Vel / np.linalg.norm(Vel) * vel_len
+                arrow(P3(anchor), P3(tip), VEL_ARROW, 2.2,
+                      1.0 if v == "GT" else 0.65)
 
         # Results table (rows XYZ/YPR/BodyLength/WingsSpan/CrossPoint,
         # columns GT / Calc).

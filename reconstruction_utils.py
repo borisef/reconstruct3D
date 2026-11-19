@@ -227,6 +227,40 @@ def wings_solution(u3, v3, u4, v4, V, D):
     return P3, P4
 
 
+def correct_velocity_with_2d(V, du, dv, eps=1e-12):
+    """Fix a noisy velocity's image-plane azimuth from the clean 2D body axis.
+
+    The velocity points tail->nose along the body, so its projection onto the
+    image is exactly the 2D tail->nose direction. When the 2D keypoints are good
+    but the velocity is noisy, that in-plane azimuth is far better known from 2D
+    than from the velocity itself; only the out-of-plane (depth) tilt, which 2D
+    cannot see, must still come from the velocity.
+
+    Camera frame: optical axis +Z, image plane spans X/Y. ``V`` is the noisy
+    velocity in camera coordinates and ``(du, dv)`` is the labelled tail->nose
+    step in normalized image coordinates (nose P2 minus tail P1, so the sign is
+    fixed). The in-plane speed ``s = hypot(Vx, Vy)`` and the depth component
+    ``Vz`` are kept; the in-plane direction is replaced by ``(du, dv)``
+    normalized. The result has the same magnitude as ``V`` by construction.
+
+    Near nose-on the geometry is degenerate -- both the in-plane speed and the
+    2D step vanish and the azimuth is ill-defined -- so when either magnitude is
+    below ``eps`` the raw velocity is returned unchanged.
+
+    Returns
+    -------
+    V_corrected : ndarray, shape (3,)
+    """
+    V = np.asarray(V, dtype=float)
+    Vx, Vy, Vz = V
+    s = float(np.hypot(Vx, Vy))            # in-plane speed to preserve
+    dn = float(np.hypot(du, dv))           # 2D tail->nose length
+    if s < eps or dn < eps:
+        return V.copy()
+    a = np.array([du / dn, dv / dn, 0.0])  # oriented in-plane unit direction
+    return s * a + np.array([0.0, 0.0, Vz])
+
+
 # --------------------------------------------------------------------------- #
 # Joint solution (all four keypoints at once, paper Part II)
 # --------------------------------------------------------------------------- #

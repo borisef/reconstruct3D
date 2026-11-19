@@ -14,8 +14,10 @@ INPUT = os.path.join(ROOT, "inputs", "aircraft_input.json")
 
 
 @pytest.fixture
-def viewer():
-    v = AircraftViewer(INPUT)
+def viewer(tmp_path):
+    # Isolated prefs file per test so Set-Algo-Params persistence never leaks
+    # between tests.
+    v = AircraftViewer(INPUT, prefs_path=str(tmp_path / "prefs.json"))
     v.build_figure()
     yield v
     plt.close(v.fig)
@@ -33,8 +35,114 @@ def test_set_algo_params_button_exists(viewer):
 
 # ── parameter state ───────────────────────────────────────────────────────────
 
-def test_defaults_on_fresh_input(viewer):
-    assert viewer.algo_params == DEFAULT_ALGO_PARAMS
+def test_defaults_on_fresh_input(tmp_path):
+    # Fresh input (no doc params) and no remembered pref -> built-in defaults.
+    v = AircraftViewer(INPUT, prefs_path=str(tmp_path / "none.json"))
+    v.build_figure()
+    try:
+        assert v.algo_params == DEFAULT_ALGO_PARAMS
+    finally:
+        plt.close(v.fig)
+
+# ── remember last choice across runs ──────────────────────────────────────────
+
+def test_set_params_persisted_and_restored(tmp_path):
+    pref = str(tmp_path / "p.json")
+    v = AircraftViewer(INPUT, prefs_path=pref)
+    v.build_figure()
+    v._ask_algo_params = lambda: {"input_noisy": False,
+                                  "head_tail_solution": "Average"}
+    v._on_set_params(None)
+    plt.close(v.fig)
+    # A brand-new viewer on the same prefs file remembers the choice.
+    v2 = AircraftViewer(INPUT, prefs_path=pref)
+    v2.build_figure()
+    try:
+        assert v2.algo_params == {"input_noisy": False,
+                                  "head_tail_solution": "Average",
+                                  "velocity_source": "vel_vec"}
+    finally:
+        plt.close(v2.fig)
+
+def test_velocity_source_persisted(tmp_path):
+    pref = str(tmp_path / "p.json")
+    v = AircraftViewer(INPUT, prefs_path=pref)
+    v.build_figure()
+    v._ask_algo_params = lambda: {"input_noisy": True,
+                                  "head_tail_solution": "#1",
+                                  "velocity_source": "corrected_by_2D_vel_vec"}
+    v._on_set_params(None)
+    plt.close(v.fig)
+    v2 = AircraftViewer(INPUT, prefs_path=pref)
+    v2.build_figure()
+    try:
+        assert v2.algo_params["velocity_source"] == "corrected_by_2D_vel_vec"
+    finally:
+        plt.close(v2.fig)
+
+def test_remembered_choice_prefills_form(tmp_path):
+    pref = str(tmp_path / "p.json")
+    v = AircraftViewer(INPUT, prefs_path=pref)
+    v.build_figure()
+    v._ask_algo_params = lambda: {"input_noisy": False,
+                                  "head_tail_solution": "Joint with wings"}
+    v._on_set_params(None)
+    plt.close(v.fig)
+    # The next run's form opens on the remembered values (algo_params feeds it).
+    v2 = AircraftViewer(INPUT, prefs_path=pref)
+    v2.build_figure()
+    try:
+        assert v2.algo_params["head_tail_solution"] == "Joint with wings"
+    finally:
+        plt.close(v2.fig)
+
+def test_remembered_pref_overrides_doc_block(tmp_path):
+    pref = str(tmp_path / "p.json")
+    v = AircraftViewer(INPUT, prefs_path=pref)
+    v.build_figure()
+    v._ask_algo_params = lambda: {"input_noisy": True,
+                                  "head_tail_solution": "Average"}
+    v._on_set_params(None)
+    plt.close(v.fig)
+    # Opening a document that carries its own params: the remembered Set-Algo-
+    # Params choice still wins, so the choice genuinely sticks across runs.
+    doc = aio.load_json(INPUT)
+    doc["Algorithm_parameters"] = {"input_noisy": False,
+                                   "head_tail_solution": "#2"}
+    docpath = str(tmp_path / "withparams.json")
+    aio.save_json(docpath, doc)
+    v2 = AircraftViewer(docpath, prefs_path=pref)
+    v2.build_figure()
+    try:
+        assert v2.algo_params["head_tail_solution"] == "Average"
+        assert v2.algo_params["input_noisy"] is True
+    finally:
+        plt.close(v2.fig)
+
+def test_doc_block_applies_when_no_pref_set(tmp_path):
+    # With no remembered preference, a document's embedded params are used.
+    doc = aio.load_json(INPUT)
+    doc["Algorithm_parameters"] = {"input_noisy": False,
+                                   "head_tail_solution": "#2"}
+    docpath = str(tmp_path / "withparams.json")
+    aio.save_json(docpath, doc)
+    v = AircraftViewer(docpath, prefs_path=str(tmp_path / "none.json"))
+    v.build_figure()
+    try:
+        assert v.algo_params["head_tail_solution"] == "#2"
+    finally:
+        plt.close(v.fig)
+
+def test_corrupt_prefs_fall_back_to_defaults(tmp_path):
+    pref = str(tmp_path / "bad.json")
+    with open(pref, "w") as fh:
+        fh.write("{ not valid json")
+    v = AircraftViewer(INPUT, prefs_path=pref)
+    v.build_figure()
+    try:
+        assert v.algo_params == DEFAULT_ALGO_PARAMS
+    finally:
+        plt.close(v.fig)
 
 def test_doc_params_loaded(tmp_path, viewer):
     doc = aio.load_json(INPUT)
@@ -45,7 +153,8 @@ def test_doc_params_loaded(tmp_path, viewer):
     viewer._ask_open = lambda: path
     viewer._on_load(None)
     assert viewer.algo_params == {"input_noisy": False,
-                                  "head_tail_solution": "Average"}
+                                  "head_tail_solution": "Average",
+                                  "velocity_source": "vel_vec"}
 
 def test_set_params_updates_state_and_doc(viewer):
     viewer._ask_algo_params = lambda: {"input_noisy": False,
@@ -106,7 +215,8 @@ def test_solve_writes_params_and_results_blocks(viewer):
     viewer._solve()
     assert viewer.doc["Algorithm_parameters"] == viewer.algo_params
     res = viewer.doc["Results"]
-    assert set(res) == {"source", "errors_2D_px", "table_3D"}
+    assert set(res) == {"source", "errors_2D_px", "errors_3D_m",
+                        "mean_error_3D_m", "table_3D"}
     assert res["errors_2D_px"]["mean"] == pytest.approx(0.0, abs=1e-6)
 
 def test_solve_status_mentions_params(viewer):
